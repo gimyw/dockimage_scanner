@@ -10,6 +10,9 @@ import re
 
 from imgadvisor.models import DockerfileIR, Finding, Severity
 
+# Single-stage to multi-stage conversion rule.
+# final image가 "빌드도 하고 실행도 하는" 상태인지 휴리스틱하게 판별한다.
+
 # 이 이미지가 base면 multi-stage를 강하게 권장
 _BUILD_BASE_PATTERNS: list[str] = [
     r"^golang:",
@@ -21,7 +24,7 @@ _BUILD_BASE_PATTERNS: list[str] = [
     r"^mcr\.microsoft\.com/dotnet/sdk:",
 ]
 
-# 이 패키지가 RUN에 있으면 multi-stage 권장
+# final stage에서 보이면 build 성격이 강한 패키지들
 _BUILD_TOOL_PACKAGES: list[str] = [
     "gcc", "g++", "make", "cmake", "build-essential",
     "maven", "gradle",
@@ -119,7 +122,7 @@ _TEMPLATES: dict[str, str] = {
 
 
 def check(ir: DockerfileIR) -> list[Finding]:
-    # 이미 multi-stage면 pass
+    # 이미 multi-stage면 이 rule은 종료한다. 세부 비효율은 다른 rule이 본다.
     if ir.is_multi_stage:
         return []
 
@@ -130,6 +133,9 @@ def check(ir: DockerfileIR) -> list[Finding]:
     image = final.base_image
     run_text = final.all_run_text
 
+    # 두 축 중 하나만 만족해도 탐지한다.
+    # - final base image 자체가 builder 지향
+    # - final stage RUN 내용에 build package 흔적이 있음
     is_build_base = any(re.match(p, image, re.IGNORECASE) for p in _BUILD_BASE_PATTERNS)
     has_build_pkg = any(re.search(rf"\b{re.escape(t)}\b", run_text, re.IGNORECASE)
                         for t in _BUILD_TOOL_PACKAGES)
@@ -157,6 +163,8 @@ def check(ir: DockerfileIR) -> list[Finding]:
 
 
 def _detect_lang(image: str, run_text: str) -> str:
+    # 추천 템플릿을 고르기 위한 가벼운 생태계 추정 로직.
+    # 정확성보다 설명 가능성과 유지보수성을 우선한다.
     if re.match(r"^golang:", image, re.IGNORECASE):
         return "go"
     if re.match(r"^rust:", image, re.IGNORECASE):

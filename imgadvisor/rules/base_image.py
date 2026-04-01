@@ -11,6 +11,15 @@ from typing import Optional
 
 from imgadvisor.models import DockerfileIR, Finding, Patch, Severity
 
+# Runtime base image optimization rule.
+# Only the final stage is inspected because it directly determines runtime image
+# size and deployment footprint.
+#
+# The implementation is table-driven:
+# - regex pattern for the detected image
+# - replacement candidates
+# - estimated saving range and caveats per candidate
+
 # (regex_pattern, list of recommendation dicts)
 # recommendation dict keys: image, min, max, note
 # {v} → regex group(1) 로 치환
@@ -230,7 +239,7 @@ _RULES: list[tuple[str, list[dict]]] = [
     ]),
 ]
 
-# already optimized — skip
+# 이미 경량 이미지로 보이거나 stage alias를 참조하는 경우는 skip.
 _ALREADY_OPTIMAL = re.compile(
     r"^("
     r"scratch"
@@ -247,6 +256,8 @@ _ALREADY_OPTIMAL = re.compile(
 
 
 def check(ir: DockerfileIR) -> list[Finding]:
+    # Builder stage가 크더라도 runtime stage가 가볍다면 이 rule의 목적에는
+    # 부합하므로, 최종 stage의 base image만 본다.
     final = ir.final_stage
     if final is None:
         return []
@@ -262,6 +273,8 @@ def check(ir: DockerfileIR) -> list[Finding]:
             continue
 
         version = m.group(1) if m.lastindex else ""
+        # 절감폭 최대치를 기준으로 대표 추천안을 고른다. 단순하고 일관적이지만,
+        # 운영 난이도까지 반영한 "가장 무난한" 선택과는 다를 수 있다.
         best = max(recs, key=lambda r: r["max"])
         best_image = best["image"].replace("{v}", version)
         note_str = f" ({best['note']})" if best.get("note") else ""
@@ -273,7 +286,9 @@ def check(ir: DockerfileIR) -> list[Finding]:
 
         recommendation = f"→ {best_image}{note_str}{alt_str}"
 
-        # Patch: 해당 FROM 라인을 교체 (단순 이미지명일 때만)
+        # Patch는 단순 이미지 교체가 가능한 경우에만 만든다.
+        # 예: "scratch (after multi-stage)"는 안내 문구이지 즉시 치환 가능한
+        # 이미지명이 아니므로 patch를 만들지 않는다.
         patch = None
         from_line_no = _find_final_from_line(ir)
         if from_line_no and "(" not in best_image and "[" not in best_image:

@@ -9,6 +9,12 @@ import re
 
 from imgadvisor.models import DockerfileIR, Finding, Severity
 
+# Final-stage cache cleanup rule.
+# `_CHECKS`의 각 항목은 하나의 패키지 매니저 또는 빌드 도구 계열을 설명한다.
+# - install: 설치/사용 흔적을 찾는 패턴
+# - cleanup: 같은 RUN 안에서 캐시 제거 또는 캐시 비활성화로 인정할 패턴
+# - recommended/min/max: 사용자에게 보여줄 개선안과 예상 절감 범위
+
 _CHECKS: list[dict] = [
     {
         "id": "APT_CACHE_NOT_CLEANED",
@@ -180,6 +186,8 @@ _CHECKS: list[dict] = [
 
 
 def check(ir: DockerfileIR) -> list[Finding]:
+    # 같은 규칙이 여러 RUN에서 반복 매칭되어도 한 번만 보고한다.
+    # 출력은 깔끔해지지만, 두 번째 이후의 발생 위치는 의도적으로 생략된다.
     final = ir.final_stage
     if final is None:
         return []
@@ -195,6 +203,8 @@ def check(ir: DockerfileIR) -> list[Finding]:
                 continue
             if not re.search(rule["install"], run_text, re.IGNORECASE):
                 continue
+            # cleanup은 같은 RUN 안에 있어야만 실제 이미지 크기 절감에 의미가 있다.
+            # 이후 RUN에서 지워도 이전 layer의 용량은 그대로 남기 때문이다.
             cleaned = any(
                 re.search(p, run_text, re.IGNORECASE) for p in rule["cleanup"]
             )

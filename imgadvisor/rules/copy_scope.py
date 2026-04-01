@@ -8,6 +8,10 @@ from __future__ import annotations
 
 from imgadvisor.models import DockerfileIR, Finding, Severity
 
+# Broad COPY scope rule.
+# final stage에서 `COPY . ...`를 쓰면 소스 외에도 테스트, 문서, 캐시, VCS
+# 메타데이터, 심지어 비밀 파일까지 유입될 수 있어 이미지가 쉽게 비대해진다.
+
 _DOCKERIGNORE_EXAMPLE = (
     ".dockerignore 예시:\n"
     "    .git\n"
@@ -27,6 +31,8 @@ _DOCKERIGNORE_EXAMPLE = (
 
 
 def check(ir: DockerfileIR) -> list[Finding]:
+    # 이 rule은 shell-form COPY만 다룬다.
+    # JSON-array COPY 구문까지 정확히 다루려면 parser가 구조화된 인자를 제공해야 한다.
     final = ir.final_stage
     if final is None:
         return []
@@ -36,12 +42,12 @@ def check(ir: DockerfileIR) -> list[Finding]:
     for instr in final.copy_instructions:
         args = instr.arguments
 
-        # 스테이지 간 복사 skip (--from=...)
+        # multi-stage artifact copy는 대개 의도된 패턴이므로 제외한다.
         if "--from=" in args:
             continue
 
         parts = args.split()
-        # COPY . <dest> 패턴
+        # 현재는 `COPY . <dest>` 형태만 탐지한다.
         if not parts or parts[0] != ".":
             continue
 
