@@ -48,10 +48,10 @@ def check(ir: DockerfileIR) -> list[Finding]:
         if not ir.has_dockerignore:
             severity = Severity.HIGH
             recommendation = (
-                ".dockerignore 파일 없음 — 불필요한 파일이 모두 이미지에 포함될 수 있음\n\n"
-                "  해결 방법 1: .dockerignore 생성\n"
+                "no .dockerignore — all files in context will be included\n\n"
+                "  option 1: create .dockerignore\n"
                 f"    {_DOCKERIGNORE_EXAMPLE}\n\n"
-                "  해결 방법 2: 명시적 COPY 사용\n"
+                "  option 2: use explicit COPY paths\n"
                 "    COPY src/ /app/src/\n"
                 "    COPY pyproject.toml /app/\n"
                 "    COPY requirements.txt /app/"
@@ -60,8 +60,8 @@ def check(ir: DockerfileIR) -> list[Finding]:
         else:
             severity = Severity.MEDIUM
             recommendation = (
-                ".dockerignore가 존재하지만 `COPY . .`는 여전히 불필요한 파일 포함 위험\n\n"
-                "  권장: 명시적 COPY 패턴\n"
+                ".dockerignore exists but COPY . . still risks including unwanted files\n\n"
+                "  prefer explicit COPY paths\n"
                 "    COPY src/ /app/src/\n"
                 "    COPY requirements.txt /app/\n"
                 "    COPY pyproject.toml /app/"
@@ -72,7 +72,7 @@ def check(ir: DockerfileIR) -> list[Finding]:
             rule_id="BROAD_COPY_SCOPE",
             severity=severity,
             line_no=instr.line_no,
-            description=f"광범위한 COPY 감지: `COPY {args}`",
+            description=f"broad COPY scope detected: `COPY {args}`",
             recommendation=recommendation,
             saving_min_mb=saving_min,
             saving_max_mb=saving_max,

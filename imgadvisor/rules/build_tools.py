@@ -57,13 +57,13 @@ def check(ir: DockerfileIR) -> list[Finding]:
 
     tools_display = ", ".join(f"`{t}`" for t in found[:6])
     if len(found) > 6:
-        tools_display += f" 외 {len(found) - 6}개"
+        tools_display += f" and {len(found) - 6} more"
 
     recommendation = (
-        "Multi-stage build로 빌드 도구 분리:\n"
-        "  1. builder stage에서 컴파일/빌드 수행\n"
-        "  2. runtime stage에는 실행에 필요한 결과물만 COPY\n\n"
-        "  예시:\n"
+        "Use multi-stage build to remove build tools from runtime:\n"
+        "  1. compile/install dependencies in a builder stage\n"
+        "  2. COPY only required artifacts into the runtime stage\n\n"
+        "  example:\n"
         "    FROM python:3.11 AS builder\n"
         "    RUN apt-get install -y gcc && pip install --no-cache-dir -r requirements.txt\n\n"
         "    FROM python:3.11-slim AS runtime\n"
@@ -75,7 +75,7 @@ def check(ir: DockerfileIR) -> list[Finding]:
         rule_id="BUILD_TOOLS_IN_FINAL_STAGE",
         severity=Severity.HIGH,
         line_no=first_line_no,
-        description=f"빌드 도구가 final stage에 존재: {tools_display}",
+        description=f"build tools found in final stage: {tools_display}",
         recommendation=recommendation,
         saving_min_mb=100,
         saving_max_mb=400,

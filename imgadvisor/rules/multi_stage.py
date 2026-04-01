@@ -141,7 +141,7 @@ def check(ir: DockerfileIR) -> list[Finding]:
     template = _TEMPLATES.get(lang, _TEMPLATES["generic"])
 
     recommendation = (
-        f"아래 multi-stage 패턴으로 전환:\n\n"
+        f"convert to multi-stage build:\n\n"
         + "\n".join(f"  {line}" for line in template.splitlines())
     )
 
@@ -149,7 +149,7 @@ def check(ir: DockerfileIR) -> list[Finding]:
         rule_id="SINGLE_STAGE_BUILD",
         severity=Severity.HIGH,
         line_no=1,
-        description="Single-stage build — 빌드 도구가 runtime 이미지에 그대로 포함됨",
+        description="single-stage build — build tools are included in the runtime image",
         recommendation=recommendation,
         saving_min_mb=150,
         saving_max_mb=600,

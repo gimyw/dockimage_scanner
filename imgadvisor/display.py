@@ -1,183 +1,141 @@
-"""
-Rich 기반 터미널 출력.
-"""
 from __future__ import annotations
 
 import json
-
-from rich import box
 import sys
 
 from rich.console import Console
-from rich.panel import Panel
 from rich.rule import Rule
 from rich.syntax import Syntax
 from rich.table import Table
-from rich.text import Text
+from rich import box
 
 from imgadvisor.models import DockerfileIR, Finding, Severity, ValidationResult
 
-# Windows 터미널 UTF-8 강제
 if sys.platform == "win32":
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")  # type: ignore[attr-defined]
     sys.stderr.reconfigure(encoding="utf-8", errors="replace")  # type: ignore[attr-defined]
 
 console = Console()
 
-_COLOR = {
-    Severity.HIGH:   "bold red",
-    Severity.MEDIUM: "bold yellow",
-    Severity.LOW:    "bold cyan",
-}
 _LABEL = {
-    Severity.HIGH:   "FAIL",
-    Severity.MEDIUM: "WARN",
-    Severity.LOW:    "INFO",
-}
-_BORDER = {
-    Severity.HIGH:   "red",
-    Severity.MEDIUM: "yellow",
-    Severity.LOW:    "cyan",
+    Severity.HIGH:   ("[bold red]FAIL[/bold red]",   "red"),
+    Severity.MEDIUM: ("[bold yellow]WARN[/bold yellow]", "yellow"),
+    Severity.LOW:    ("[bold cyan]INFO[/bold cyan]",  "cyan"),
 }
 
 
 def print_analysis(ir: DockerfileIR, findings: list[Finding]) -> None:
     console.print()
-    console.print(Panel.fit(
-        "[bold cyan]imgadvisor[/bold cyan]  -  Pre-Build Analyzer",
-        border_style="cyan",
-    ))
+
+    # ── header ───────────────────────────────────────────────────────────────
+    stage_info = (
+        "[green]multi-stage[/green]" if ir.is_multi_stage
+        else "[yellow]single-stage[/yellow]"
+    )
+    di_info = "[green]yes[/green]" if ir.has_dockerignore else "[red]no[/red]"
+    base = ir.final_stage.base_image if ir.final_stage else "unknown"
+
+    console.print(f"  [bold]imgadvisor[/bold]  [dim]{ir.path}[/dim]")
+    console.print(
+        f"  [dim]base[/dim] [bold]{base}[/bold]  "
+        f"[dim]stages[/dim] {len(ir.stages)} ({stage_info})  "
+        f"[dim].dockerignore[/dim] {di_info}"
+    )
     console.print()
 
-    # ── 기본 정보 ─────────────────────────────────────────────────────────
-    stage_text = str(len(ir.stages))
-    if ir.is_multi_stage:
-        stage_text += "  [green](multi-stage OK)[/green]"
-    else:
-        stage_text += "  [yellow](single-stage !)[/yellow]"
-
-    di_text = "[green]있음[/green]" if ir.has_dockerignore else "[red]없음[/red]"
-
-    console.print(f"  [dim]Dockerfile   :[/dim]  {ir.path}")
-    console.print(f"  [dim]Stages       :[/dim]  {stage_text}")
-    if ir.final_stage:
-        console.print(
-            f"  [dim]Final image  :[/dim]  [bold]{ir.final_stage.base_image}[/bold]"
-        )
-    console.print(f"  [dim].dockerignore:[/dim]  {di_text}")
-    console.print()
-
+    # ── no issues ────────────────────────────────────────────────────────────
     if not findings:
-        console.print(Panel(
-            "[bold green][OK]  최적화 이슈 없음[/bold green]\n"
-            "현재 분석 규칙을 모두 통과했습니다.",
-            border_style="green",
-        ))
+        console.print("  [bold green]No issues found.[/bold green]")
+        console.print()
         return
 
-    console.print(Rule("[dim]분석 결과[/dim]", style="dim"))
-    console.print()
+    # ── findings ─────────────────────────────────────────────────────────────
+    console.print(Rule(style="dim"))
 
     for f in findings:
         _print_finding(f)
 
-    # ── 요약 ─────────────────────────────────────────────────────────────
-    console.print(Rule("[dim]요약[/dim]", style="dim"))
-    console.print()
+    # ── summary ──────────────────────────────────────────────────────────────
+    console.print(Rule(style="dim"))
 
     fail_n = sum(1 for f in findings if f.severity == Severity.HIGH)
     warn_n = sum(1 for f in findings if f.severity == Severity.MEDIUM)
-    info_n = sum(1 for f in findings if f.severity == Severity.LOW)
-
-    issues_parts: list[str] = []
-    if fail_n:
-        issues_parts.append(f"[bold red]{fail_n} FAIL[/bold red]")
-    if warn_n:
-        issues_parts.append(f"[bold yellow]{warn_n} WARN[/bold yellow]")
-    if info_n:
-        issues_parts.append(f"[bold cyan]{info_n} INFO[/bold cyan]")
-
     total_min = sum(f.saving_min_mb for f in findings)
     total_max = sum(f.saving_max_mb for f in findings)
 
-    tbl = Table(box=box.ROUNDED, show_header=False, padding=(0, 2))
-    tbl.add_column("key", style="dim", no_wrap=True)
-    tbl.add_column("val")
-    tbl.add_row("이슈",      "  ".join(issues_parts))
-    tbl.add_row("예상 절감", f"[bold green]{total_min:,} ~ {total_max:,} MB[/bold green]")
-    console.print(tbl)
-    console.print()
+    parts: list[str] = []
+    if fail_n:
+        parts.append(f"[bold red]{fail_n} failures[/bold red]")
+    if warn_n:
+        parts.append(f"[bold yellow]{warn_n} warnings[/bold yellow]")
 
     console.print(
-        "  [dim]최적화 Dockerfile 생성:[/dim]  "
-        "[bold cyan]imgadvisor recommend --dockerfile <path>[/bold cyan]"
+        f"  {'  '.join(parts)}  "
+        f"[dim]|[/dim]  est. savings [green]{total_min:,} ~ {total_max:,} MB[/green]"
+    )
+    console.print(
+        f"  [dim]run:[/dim] imgadvisor recommend -f {ir.path}"
     )
     console.print()
 
 
 def _print_finding(f: Finding) -> None:
-    label  = _LABEL.get(f.severity, "INFO")
-    color  = _COLOR.get(f.severity, "white")
-    border = _BORDER.get(f.severity, "white")
+    label, color = _LABEL.get(f.severity, ("[dim]INFO[/dim]", "dim"))
+    line_str = f"line {f.line_no:>3}" if f.line_no else "        "
 
-    line_hint = f"  line {f.line_no}" if f.line_no else ""
+    # first line: severity + line + rule id
+    console.print(f"  {label}  [dim]{line_str}[/dim]  [bold]{f.rule_id}[/bold]")
 
-    header = Text()
-    header.append(f"[{label}] ", style=color)
-    header.append(f.rule_id, style="bold")
-    header.append(line_hint, style="dim")
+    # description (one line)
+    desc = f.description.replace("`", "")
+    console.print(f"           [dim]{desc}[/dim]")
 
-    body_parts = [f"  {f.description}", ""]
-    for line in f.recommendation.splitlines():
-        body_parts.append(f"  {line}")
+    # recommendation (first meaningful line only — keep it compact)
+    rec_lines = [l.strip() for l in f.recommendation.splitlines() if l.strip()]
+    if rec_lines:
+        first = rec_lines[0].lstrip("-> ").strip()
+        console.print(f"           [dim]fix:[/dim] {first}")
 
+    # savings
     if f.saving_min_mb > 0 or f.saving_max_mb > 0:
-        body_parts += ["", f"  [dim]예상 절감:[/dim]  [green]{f.saving_display}[/green]"]
+        console.print(
+            f"           [dim]est.[/dim] [green]{f.saving_display}[/green]"
+        )
 
-    content = Text.from_markup(str(header) + "\n" + "\n".join(body_parts))
-
-    console.print(Panel(content, border_style=border, padding=(0, 1)))
     console.print()
 
 
 def print_recommended_dockerfile(content: str) -> None:
     console.print()
-    console.print(Rule("[dim]최적화 Dockerfile[/dim]", style="dim"))
+    console.print(Rule("optimized dockerfile", style="dim"))
     console.print(Syntax(content, "dockerfile", theme="monokai", line_numbers=True))
     console.print()
 
 
 def print_validation(result: ValidationResult) -> None:
     console.print()
-    console.print(Panel.fit(
-        "[bold cyan]imgadvisor[/bold cyan]  -  Build Validation",
-        border_style="cyan",
-    ))
-    console.print()
-
-    size_delta = result.original_size_mb - result.optimized_size_mb
-    layer_delta = result.original_layers - result.optimized_layers
-
-    tbl = Table(box=box.ROUNDED)
+    tbl = Table(box=box.SIMPLE, show_header=True, header_style="dim")
     tbl.add_column("", style="dim")
-    tbl.add_column("Original",  justify="right")
-    tbl.add_column("Optimized", justify="right", style="green")
-    tbl.add_column("절감",       justify="right")
+    tbl.add_column("original",  justify="right")
+    tbl.add_column("optimized", justify="right", style="green")
+    tbl.add_column("saved",     justify="right")
+
+    size_delta  = result.original_size_mb - result.optimized_size_mb
+    layer_delta = result.original_layers  - result.optimized_layers
 
     tbl.add_row(
-        "Image size",
+        "image size",
         f"{result.original_size_mb:.1f} MB",
         f"{result.optimized_size_mb:.1f} MB",
-        f"[bold green]-{size_delta:.1f} MB  ({result.reduction_pct:.1f}%)[/bold green]",
+        f"[bold green]-{size_delta:.1f} MB ({result.reduction_pct:.1f}%)[/bold green]",
     )
     tbl.add_row(
-        "Layers",
+        "layers",
         str(result.original_layers),
         str(result.optimized_layers),
         (f"[bold green]-{layer_delta}[/bold green]" if layer_delta > 0
          else f"[yellow]{layer_delta:+}[/yellow]"),
     )
-
     console.print(tbl)
     console.print()
 

@@ -21,7 +21,7 @@ _CHECKS: list[dict] = [
         ],
         "recommended": (
             "RUN apt-get update && apt-get install -y --no-install-recommends \\\n"
-            "        <패키지> \\\n"
+            "        <pkg> \\\n"
             "    && rm -rf /var/lib/apt/lists/*"
         ),
         "min": 30, "max": 120,
@@ -34,7 +34,7 @@ _CHECKS: list[dict] = [
             r"--no-cache-dir",
             r"pip\s+cache\s+purge",
         ],
-        "recommended": "RUN pip install --no-cache-dir <패키지>",
+        "recommended": "RUN pip install --no-cache-dir <pkg>",
         "min": 20, "max": 80,
     },
     {
@@ -45,7 +45,7 @@ _CHECKS: list[dict] = [
             r"--no-cache",
             r"rm\s+-rf\s+/var/cache/apk",
         ],
-        "recommended": "RUN apk add --no-cache <패키지>",
+        "recommended": "RUN apk add --no-cache <pkg>",
         "min": 10, "max": 40,
     },
     {
@@ -102,7 +102,7 @@ _CHECKS: list[dict] = [
             r"rm\s+-rf\s+/var/cache/yum",
         ],
         "recommended": (
-            "RUN yum install -y <패키지> \\\n"
+            "RUN yum install -y <pkg> \\\n"
             "    && yum clean all \\\n"
             "    && rm -rf /var/cache/yum"
         ),
@@ -115,7 +115,7 @@ _CHECKS: list[dict] = [
         "cleanup": [
             r"dnf\s+clean\s+all",
         ],
-        "recommended": "RUN dnf install -y <패키지> && dnf clean all",
+        "recommended": "RUN dnf install -y <pkg> && dnf clean all",
         "min": 20, "max": 80,
     },
     {
@@ -157,9 +157,8 @@ _CHECKS: list[dict] = [
             r"rm\s+-rf\s+/root/\.m2",
         ],
         "recommended": (
-            "Multi-stage build 사용:\n"
-            "  builder stage에서 mvn package 후\n"
-            "  runtime stage에 JAR만 COPY → ~/.m2 캐시 자동 제외"
+            "Use multi-stage build: run mvn package in builder stage,\n"
+            "  COPY only the JAR to runtime stage (excludes ~/.m2 cache)"
         ),
         "min": 50, "max": 200,
     },
@@ -172,9 +171,8 @@ _CHECKS: list[dict] = [
             r"rm\s+-rf\s+/root/\.gradle",
         ],
         "recommended": (
-            "Multi-stage build 사용:\n"
-            "  builder stage에서 gradle build 후\n"
-            "  runtime stage에 JAR/WAR만 COPY → .gradle 캐시 자동 제외"
+            "Use multi-stage build: run gradle build in builder stage,\n"
+            "  COPY only JAR/WAR to runtime stage (excludes .gradle cache)"
         ),
         "min": 50, "max": 200,
     },
@@ -208,8 +206,8 @@ def check(ir: DockerfileIR) -> list[Finding]:
                 rule_id=rule["id"],
                 severity=Severity.MEDIUM,
                 line_no=instr.line_no,
-                description=f"`{rule['pm']}` 캐시 정리 없음",
-                recommendation=f"권장 패턴:\n  {rule['recommended']}",
+                description=f"`{rule['pm']}` cache not cleaned",
+                recommendation=rule["recommended"],
                 saving_min_mb=rule["min"],
                 saving_max_mb=rule["max"],
             ))
