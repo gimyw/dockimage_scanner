@@ -64,6 +64,9 @@ Dockerfile 분석             왜 큰지 설명                  최적화 Docke
 curl -fsSL https://raw.githubusercontent.com/0206pdh/dockimage_scanner/main/install.sh | bash
 ```
 
+위 curl 명령은 bootstrap 스크립트를 `main`에서 받지만, 실제 설치 대상은 항상
+GitHub의 최신 release tag입니다.
+
 ### pip
 
 ```bash
