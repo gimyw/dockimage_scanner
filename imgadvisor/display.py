@@ -93,7 +93,9 @@ def _print_finding(f: Finding) -> None:
     # recommendation (first meaningful line only — keep it compact)
     rec_lines = [l.strip() for l in f.recommendation.splitlines() if l.strip()]
     if rec_lines:
-        first = rec_lines[0].lstrip("-> ").strip()
+        first = rec_lines[0].lstrip("-> ").rstrip(" \\").strip()
+        if len(first) > 60:
+            first = first[:57] + "..."
         console.print(f"           [dim]fix:[/dim] {first}")
 
     # savings
