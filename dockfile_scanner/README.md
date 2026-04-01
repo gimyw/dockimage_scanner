@@ -58,13 +58,24 @@ Dockerfile 분석             왜 큰지 설명                  최적화 Docke
 
 ## 설치
 
-```bash
-# 개발 모드 (소스에서 직접)
-pip install -e .
+### curl (권장)
 
-# 또는 의존성만 설치 후 직접 실행
-pip install -r requirements.txt
-python -m imgadvisor.main
+```bash
+curl -fsSL https://raw.githubusercontent.com/0206pdh/dockimage_scanner/main/install.sh | bash
+```
+
+### pip
+
+```bash
+pip install git+https://github.com/0206pdh/dockimage_scanner.git
+```
+
+### 소스에서 직접
+
+```bash
+git clone https://github.com/0206pdh/dockimage_scanner.git
+cd dockimage_scanner
+pip install -e .
 ```
 
 **요구사항:** Python 3.11+
