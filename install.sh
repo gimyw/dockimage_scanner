@@ -29,61 +29,75 @@ if [ -z "$PYTHON" ]; then
 fi
 info "Python: $($PYTHON --version)"
 
-# ── pip 확인 및 자동 설치 ────────────────────────────────────────────────────
-if ! "$PYTHON" -m pip --version &>/dev/null 2>&1; then
-  warn "pip 없음 — 자동 설치 시도..."
-  if command -v apt-get &>/dev/null; then
-    sudo apt-get install -y python3-pip 2>/dev/null || \
-      "$PYTHON" -m ensurepip --upgrade 2>/dev/null || \
-      error "pip 설치 실패. 수동으로 설치하세요: sudo apt install python3-pip"
-  elif command -v yum &>/dev/null; then
-    sudo yum install -y python3-pip 2>/dev/null || \
-      error "pip 설치 실패. 수동으로 설치하세요: sudo yum install python3-pip"
-  else
-    "$PYTHON" -m ensurepip --upgrade 2>/dev/null || \
-      error "pip 설치 실패. https://pip.pypa.io/en/stable/installation/ 참고"
-  fi
-fi
-
 # ── git 확인 ────────────────────────────────────────────────────────────────
 if ! command -v git &>/dev/null; then
   warn "git 없음 — 자동 설치 시도..."
   if command -v apt-get &>/dev/null; then
-    sudo apt-get install -y git || error "git 설치 실패"
+    apt-get install -y git 2>/dev/null || sudo apt-get install -y git || error "git 설치 실패"
   elif command -v yum &>/dev/null; then
-    sudo yum install -y git || error "git 설치 실패"
+    yum install -y git 2>/dev/null || sudo yum install -y git || error "git 설치 실패"
   else
     error "git 이 없습니다. 수동으로 설치하세요."
   fi
 fi
 
-# ── imgadvisor 설치 ──────────────────────────────────────────────────────────
+# ── pipx 우선 시도 → pip fallback ───────────────────────────────────────────
+install_with_pipx() {
+  if ! command -v pipx &>/dev/null; then
+    info "pipx 설치 중..."
+    if command -v apt-get &>/dev/null; then
+      apt-get install -y pipx 2>/dev/null || sudo apt-get install -y pipx || return 1
+    else
+      "$PYTHON" -m pip install --quiet pipx 2>/dev/null || return 1
+    fi
+  fi
+  info "pipx로 설치 중..."
+  pipx install "git+https://github.com/${REPO}.git" --force
+  pipx ensurepath
+}
+
+install_with_pip() {
+  if ! "$PYTHON" -m pip --version &>/dev/null 2>&1; then
+    if command -v apt-get &>/dev/null; then
+      apt-get install -y python3-pip 2>/dev/null || sudo apt-get install -y python3-pip
+    fi
+  fi
+  info "pip으로 설치 중..."
+  # externally-managed-environment (PEP 668) 대응: --break-system-packages
+  "$PYTHON" -m pip install --quiet --upgrade \
+    --break-system-packages \
+    "git+https://github.com/${REPO}.git" 2>/dev/null \
+  || "$PYTHON" -m pip install --quiet --upgrade \
+    "git+https://github.com/${REPO}.git"
+}
+
 info "설치 중... (github.com/${REPO})"
-"$PYTHON" -m pip install --quiet --upgrade \
-  "git+https://github.com/${REPO}.git"
+if ! install_with_pipx 2>/dev/null; then
+  warn "pipx 실패, pip으로 재시도..."
+  install_with_pip
+fi
 
 # ── PATH 처리 ────────────────────────────────────────────────────────────────
-# ~/.local/bin 이 PATH에 없으면 추가
-LOCAL_BIN="$HOME/.local/bin"
-if [[ ":$PATH:" != *":$LOCAL_BIN:"* ]]; then
-  export PATH="$LOCAL_BIN:$PATH"
-  warn "PATH에 $LOCAL_BIN 추가. 영구 적용하려면 ~/.bashrc 에 아래 줄 추가:"
-  warn "  export PATH=\"\$HOME/.local/bin:\$PATH\""
-fi
+for extra_path in "$HOME/.local/bin" "$HOME/.local/pipx/venvs/imgadvisor/bin"; do
+  if [ -f "$extra_path/$TOOL" ] && [[ ":$PATH:" != *":$extra_path:"* ]]; then
+    export PATH="$extra_path:$PATH"
+    warn "PATH에 $extra_path 추가됨. 영구 적용:"
+    warn "  echo 'export PATH=\"$extra_path:\$PATH\"' >> ~/.bashrc && source ~/.bashrc"
+  fi
+done
 
 # ── 확인 ─────────────────────────────────────────────────────────────────────
 if command -v "$TOOL" &>/dev/null; then
-  info "설치 완료! ($("$TOOL" --version 2>/dev/null || echo 'v0.1.0'))"
+  info "설치 완료!"
   echo ""
   echo "  사용법:"
   echo "    imgadvisor analyze   --dockerfile Dockerfile"
   echo "    imgadvisor recommend --dockerfile Dockerfile --output optimized.Dockerfile"
   echo "    imgadvisor validate  --dockerfile Dockerfile --optimized optimized.Dockerfile"
   echo ""
-  echo "  도움말:"
-  echo "    imgadvisor --help"
+  echo "  도움말: imgadvisor --help"
 else
-  warn "'imgadvisor' 명령어를 찾을 수 없습니다."
-  warn "새 터미널을 열거나 아래 명령으로 PATH를 갱신하세요:"
-  warn "  export PATH=\"\$HOME/.local/bin:\$PATH\""
+  warn "설치는 완료됐으나 명령어를 찾을 수 없습니다. 새 터미널을 열거나:"
+  warn "  source ~/.bashrc"
+  warn "  또는: export PATH=\"\$HOME/.local/bin:\$PATH\""
 fi
