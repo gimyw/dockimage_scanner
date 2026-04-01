@@ -9,6 +9,12 @@ import re
 
 from imgadvisor.models import DockerfileIR, Finding, Severity
 
+# Final-stage cache cleanup rule.
+# `_CHECKS`의 각 항목은 하나의 패키지 매니저 또는 빌드 도구 계열을 설명한다.
+# - install: 설치/사용 흔적을 찾는 패턴
+# - cleanup: 같은 RUN 안에서 캐시 제거 또는 캐시 비활성화로 인정할 패턴
+# - recommended/min/max: 사용자에게 보여줄 개선안과 예상 절감 범위
+
 _CHECKS: list[dict] = [
     {
         "id": "APT_CACHE_NOT_CLEANED",
@@ -21,7 +27,7 @@ _CHECKS: list[dict] = [
         ],
         "recommended": (
             "RUN apt-get update && apt-get install -y --no-install-recommends \\\n"
-            "        <패키지> \\\n"
+            "        <pkg> \\\n"
             "    && rm -rf /var/lib/apt/lists/*"
         ),
         "min": 30, "max": 120,
@@ -34,7 +40,7 @@ _CHECKS: list[dict] = [
             r"--no-cache-dir",
             r"pip\s+cache\s+purge",
         ],
-        "recommended": "RUN pip install --no-cache-dir <패키지>",
+        "recommended": "RUN pip install --no-cache-dir <pkg>",
         "min": 20, "max": 80,
     },
     {
@@ -45,7 +51,7 @@ _CHECKS: list[dict] = [
             r"--no-cache",
             r"rm\s+-rf\s+/var/cache/apk",
         ],
-        "recommended": "RUN apk add --no-cache <패키지>",
+        "recommended": "RUN apk add --no-cache <pkg>",
         "min": 10, "max": 40,
     },
     {
@@ -102,7 +108,7 @@ _CHECKS: list[dict] = [
             r"rm\s+-rf\s+/var/cache/yum",
         ],
         "recommended": (
-            "RUN yum install -y <패키지> \\\n"
+            "RUN yum install -y <pkg> \\\n"
             "    && yum clean all \\\n"
             "    && rm -rf /var/cache/yum"
         ),
@@ -115,7 +121,7 @@ _CHECKS: list[dict] = [
         "cleanup": [
             r"dnf\s+clean\s+all",
         ],
-        "recommended": "RUN dnf install -y <패키지> && dnf clean all",
+        "recommended": "RUN dnf install -y <pkg> && dnf clean all",
         "min": 20, "max": 80,
     },
     {
@@ -157,9 +163,8 @@ _CHECKS: list[dict] = [
             r"rm\s+-rf\s+/root/\.m2",
         ],
         "recommended": (
-            "Multi-stage build 사용:\n"
-            "  builder stage에서 mvn package 후\n"
-            "  runtime stage에 JAR만 COPY → ~/.m2 캐시 자동 제외"
+            "Use multi-stage build: run mvn package in builder stage,\n"
+            "  COPY only the JAR to runtime stage (excludes ~/.m2 cache)"
         ),
         "min": 50, "max": 200,
     },
@@ -172,9 +177,8 @@ _CHECKS: list[dict] = [
             r"rm\s+-rf\s+/root/\.gradle",
         ],
         "recommended": (
-            "Multi-stage build 사용:\n"
-            "  builder stage에서 gradle build 후\n"
-            "  runtime stage에 JAR/WAR만 COPY → .gradle 캐시 자동 제외"
+            "Use multi-stage build: run gradle build in builder stage,\n"
+            "  COPY only JAR/WAR to runtime stage (excludes .gradle cache)"
         ),
         "min": 50, "max": 200,
     },
@@ -182,6 +186,8 @@ _CHECKS: list[dict] = [
 
 
 def check(ir: DockerfileIR) -> list[Finding]:
+    # 같은 규칙이 여러 RUN에서 반복 매칭되어도 한 번만 보고한다.
+    # 출력은 깔끔해지지만, 두 번째 이후의 발생 위치는 의도적으로 생략된다.
     final = ir.final_stage
     if final is None:
         return []
@@ -197,6 +203,8 @@ def check(ir: DockerfileIR) -> list[Finding]:
                 continue
             if not re.search(rule["install"], run_text, re.IGNORECASE):
                 continue
+            # cleanup은 같은 RUN 안에 있어야만 실제 이미지 크기 절감에 의미가 있다.
+            # 이후 RUN에서 지워도 이전 layer의 용량은 그대로 남기 때문이다.
             cleaned = any(
                 re.search(p, run_text, re.IGNORECASE) for p in rule["cleanup"]
             )
@@ -208,8 +216,8 @@ def check(ir: DockerfileIR) -> list[Finding]:
                 rule_id=rule["id"],
                 severity=Severity.MEDIUM,
                 line_no=instr.line_no,
-                description=f"`{rule['pm']}` 캐시 정리 없음",
-                recommendation=f"권장 패턴:\n  {rule['recommended']}",
+                description=f"`{rule['pm']}` cache not cleaned",
+                recommendation=rule["recommended"],
                 saving_min_mb=rule["min"],
                 saving_max_mb=rule["max"],
             ))

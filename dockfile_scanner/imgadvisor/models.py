@@ -100,3 +100,41 @@ class ValidationResult:
         if self.original_size_mb == 0:
             return 0.0
         return (self.delta_mb / self.original_size_mb) * 100
+
+
+@dataclass
+class TrivyFinding:
+    # `scanner` distinguishes whether the finding came from `trivy config`
+    # or `trivy fs`, which helps the CLI present the result in two clear groups.
+    scanner: str
+    target: str
+    severity: str
+    rule_id: str
+    title: str
+    description: str
+    recommendation: str
+    primary_url: Optional[str] = None
+    pkg_name: Optional[str] = None
+    installed_version: Optional[str] = None
+    fixed_version: Optional[str] = None
+    line_no: Optional[int] = None
+    file_path: Optional[str] = None
+
+
+@dataclass
+class TrivyScanResult:
+    dockerfile_path: str
+    context_dir: str
+    findings: list[TrivyFinding]
+
+    @property
+    def config_findings(self) -> list[TrivyFinding]:
+        return [finding for finding in self.findings if finding.scanner == "config"]
+
+    @property
+    def fs_findings(self) -> list[TrivyFinding]:
+        return [finding for finding in self.findings if finding.scanner == "fs"]
+
+    @property
+    def total_findings(self) -> int:
+        return len(self.findings)

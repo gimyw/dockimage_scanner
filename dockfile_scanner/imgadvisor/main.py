@@ -5,7 +5,7 @@ from typing import Optional
 
 import typer
 
-from imgadvisor import display, recommender, validator
+from imgadvisor import display, recommender, trivy_scanner, validator
 from imgadvisor.analyzer import analyze
 from imgadvisor.parser import parse
 
@@ -123,6 +123,64 @@ def cmd_validate(
         raise typer.Exit(code=1)
 
     display.print_validation(result)
+
+
+@app.command(name="scan")
+def cmd_scan(
+    dockerfile: Path = typer.Option(
+        ..., "--dockerfile", "-f",
+        help="Trivy pre-build 검사를 수행할 Dockerfile 경로",
+        exists=True, readable=True,
+    ),
+    severity: str = typer.Option(
+        "MEDIUM,HIGH,CRITICAL", "--severity",
+        help="Trivy severity filter. Example: LOW,MEDIUM,HIGH,CRITICAL",
+    ),
+    ignore_unfixed: bool = typer.Option(
+        False, "--ignore-unfixed",
+        help="수정 버전이 없는 취약점은 제외",
+    ),
+    timeout: int = typer.Option(
+        300, "--timeout",
+        help="Trivy command timeout in seconds",
+        min=30,
+    ),
+    json_out: bool = typer.Option(
+        False, "--json",
+        help="결과를 JSON으로 출력",
+    ),
+) -> None:
+    """
+    Run Trivy pre-build checks for Dockerfile config and build-context dependencies.
+
+    This command intentionally does not build an image. Instead it combines:
+    - `trivy config` for Dockerfile misconfigurations
+    - `trivy fs` for dependency vulnerabilities in the build context
+
+    \b
+    Examples:
+        imgadvisor scan -f Dockerfile
+        imgadvisor scan -f Dockerfile --severity HIGH,CRITICAL
+        imgadvisor scan -f Dockerfile --ignore-unfixed --json
+    """
+    try:
+        result = trivy_scanner.scan(
+            dockerfile_path=str(dockerfile),
+            severity=severity,
+            ignore_unfixed=ignore_unfixed,
+            timeout_seconds=timeout,
+        )
+    except RuntimeError as exc:
+        typer.echo(f"[ERROR] {exc}", err=True)
+        raise typer.Exit(code=1)
+
+    if json_out:
+        display.print_trivy_json_result(result)
+    else:
+        display.print_trivy_scan(result)
+
+    if result.total_findings:
+        raise typer.Exit(code=1)
 
 
 if __name__ == "__main__":

@@ -122,6 +122,22 @@ imgadvisor validate \
 Docker 데몬이 실행 중이어야 합니다.  
 원본/최적화 이미지를 각각 빌드 후 크기·레이어 수 비교를 출력합니다.
 
+### 4. `scan` — Trivy pre-build security scan
+
+```bash
+imgadvisor scan -f Dockerfile
+imgadvisor scan -f Dockerfile --severity HIGH,CRITICAL
+imgadvisor scan -f Dockerfile --ignore-unfixed --json
+```
+
+This command does not build an image. It combines:
+- `trivy config` for Dockerfile misconfiguration checks
+- `trivy fs` for dependency vulnerability checks in the build context
+
+Notes:
+- `trivy` must be installed locally and available on `PATH`
+- this is a pre-build scan, so final image OS packages are not covered yet
+
 ---
 
 ## 탐지 규칙

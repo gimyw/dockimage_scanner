@@ -9,7 +9,14 @@ from rich.syntax import Syntax
 from rich.table import Table
 from rich import box
 
-from imgadvisor.models import DockerfileIR, Finding, Severity, ValidationResult
+from imgadvisor.models import (
+    DockerfileIR,
+    Finding,
+    Severity,
+    TrivyFinding,
+    TrivyScanResult,
+    ValidationResult,
+)
 
 if sys.platform == "win32":
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")  # type: ignore[attr-defined]
@@ -21,6 +28,14 @@ _LABEL = {
     Severity.HIGH:   ("[bold red]FAIL[/bold red]",   "red"),
     Severity.MEDIUM: ("[bold yellow]WARN[/bold yellow]", "yellow"),
     Severity.LOW:    ("[bold cyan]INFO[/bold cyan]",  "cyan"),
+}
+
+_TRIVY_LABEL = {
+    "CRITICAL": ("[bold red]CRIT[/bold red]", "red"),
+    "HIGH": ("[bold red]FAIL[/bold red]", "red"),
+    "MEDIUM": ("[bold yellow]WARN[/bold yellow]", "yellow"),
+    "LOW": ("[bold cyan]INFO[/bold cyan]", "cyan"),
+    "UNKNOWN": ("[dim]UNKW[/dim]", "dim"),
 }
 
 
@@ -140,6 +155,108 @@ def print_validation(result: ValidationResult) -> None:
     )
     console.print(tbl)
     console.print()
+
+
+def print_trivy_scan(result: TrivyScanResult) -> None:
+    console.print()
+    console.print(f"  [bold]imgadvisor[/bold]  [dim]{result.dockerfile_path}[/dim]")
+    console.print(
+        f"  [dim]scan[/dim] [bold]trivy pre-build[/bold]  "
+        f"[dim]context[/dim] {result.context_dir}"
+    )
+    console.print()
+
+    if not result.findings:
+        console.print("  [bold green]No Trivy findings found.[/bold green]")
+        console.print()
+        return
+
+    console.print(Rule("trivy config", style="dim"))
+    if result.config_findings:
+        for finding in result.config_findings:
+            _print_trivy_finding(finding)
+    else:
+        console.print("  [dim]No config findings.[/dim]")
+        console.print()
+
+    console.print(Rule("trivy fs", style="dim"))
+    if result.fs_findings:
+        for finding in result.fs_findings:
+            _print_trivy_finding(finding)
+    else:
+        console.print("  [dim]No filesystem vulnerability findings.[/dim]")
+        console.print()
+
+    severity_counts: dict[str, int] = {}
+    for finding in result.findings:
+        severity_counts[finding.severity] = severity_counts.get(finding.severity, 0) + 1
+
+    ordered = ["CRITICAL", "HIGH", "MEDIUM", "LOW", "UNKNOWN"]
+    summary_parts = [
+        f"{severity_counts[level]} {level.lower()}"
+        for level in ordered
+        if severity_counts.get(level)
+    ]
+    console.print(Rule(style="dim"))
+    console.print(f"  [bold]{result.total_findings} findings[/bold]  [dim]|[/dim]  " + "  ".join(summary_parts))
+    console.print()
+
+
+def _print_trivy_finding(finding: TrivyFinding) -> None:
+    label, _ = _TRIVY_LABEL.get(finding.severity.upper(), ("[dim]INFO[/dim]", "dim"))
+    line_str = f"line {finding.line_no:>3}" if finding.line_no else "        "
+    target = finding.file_path or finding.target
+
+    console.print(f"  {label}  [dim]{line_str}[/dim]  [bold]{finding.rule_id}[/bold]")
+    console.print(f"           [dim]{finding.title}[/dim]")
+
+    if finding.pkg_name:
+        version_text = finding.installed_version or "unknown"
+        fixed_text = finding.fixed_version or "-"
+        console.print(
+            f"           [dim]pkg:[/dim] {finding.pkg_name}  "
+            f"[dim]installed:[/dim] {version_text}  "
+            f"[dim]fixed:[/dim] {fixed_text}"
+        )
+
+    if target:
+        console.print(f"           [dim]target:[/dim] {target}")
+
+    first_recommendation = finding.recommendation.strip().splitlines()[0] if finding.recommendation.strip() else ""
+    if first_recommendation:
+        console.print(f"           [dim]fix:[/dim] {first_recommendation}")
+
+    if finding.primary_url:
+        console.print(f"           [dim]ref:[/dim] {finding.primary_url}")
+
+    console.print()
+
+
+def print_trivy_json_result(result: TrivyScanResult) -> None:
+    data = {
+        "dockerfile": result.dockerfile_path,
+        "context_dir": result.context_dir,
+        "total_findings": result.total_findings,
+        "findings": [
+            {
+                "scanner": finding.scanner,
+                "target": finding.target,
+                "severity": finding.severity,
+                "rule_id": finding.rule_id,
+                "title": finding.title,
+                "description": finding.description,
+                "recommendation": finding.recommendation,
+                "primary_url": finding.primary_url,
+                "pkg_name": finding.pkg_name,
+                "installed_version": finding.installed_version,
+                "fixed_version": finding.fixed_version,
+                "line_no": finding.line_no,
+                "file_path": finding.file_path,
+            }
+            for finding in result.findings
+        ],
+    }
+    console.print_json(json.dumps(data, ensure_ascii=False, indent=2))
 
 
 def print_json_result(ir: DockerfileIR, findings: list[Finding]) -> None:
