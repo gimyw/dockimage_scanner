@@ -1,47 +1,46 @@
 # imgadvisor
 
-> Dockerfile pre-build static analyzer and image optimization advisor
+> Dockerfile 정적 분석기 및 이미지 최적화 어드바이저
 
-Reads your Dockerfile **before building** and tells you why the image is large,
-what to fix, and how much you can save — no Docker daemon required for static analysis.
+Dockerfile을 **빌드 전에** 읽어서 이미지가 왜 큰지, 뭘 고쳐야 하는지, 얼마나 줄일 수 있는지 알려준다. 정적 분석에는 Docker 데몬이 필요 없다.
 
 ---
 
-## Installation
+## 설치
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/0206pdh/dockimage_scanner/main/install.sh | bash
 source ~/.bashrc
 ```
 
-Installs into `~/.imgadvisor` venv, adds `imgadvisor` to `~/.local/bin`.
+`~/.imgadvisor` 가상환경에 설치되고 `imgadvisor` 명령이 `~/.local/bin`에 추가된다.
 
-**Requirements:** Python 3.11+, Docker daemon (for `layers` / `validate` only)
+**요구사항:** Python 3.11+, Docker 데몬(`layers` / `validate` 명령에만 필요)
 
 ---
 
-## Commands
+## 명령어
 
-| Command | Docker required | What it does |
+| 명령어 | Docker 필요 | 기능 |
 |---|---|---|
-| `analyze` | No | Static analysis — detects bloat causes, estimates savings |
-| `recommend` | No | Generates an optimized Dockerfile draft |
-| `layers` | Yes | Builds image, shows real per-layer sizes from `docker history` |
-| `validate` | Yes | Builds both Dockerfiles, compares actual size and layer count |
-| `scan` | No | Runs Trivy pre-build vulnerability scan (Trivy required) |
+| `analyze` | 불필요 | 정적 분석 — 이미지 비대 원인 탐지, 예상 절감량 표시 |
+| `recommend` | 불필요 | 최적화된 Dockerfile 초안 생성 |
+| `layers` | 필요 | 이미지 빌드 후 `docker history`로 실제 레이어별 크기 표시 |
+| `validate` | 필요 | 원본/최적화 Dockerfile을 모두 빌드해서 실제 크기·레이어 수 비교 |
+| `scan` | 불필요 | Trivy 프리빌드 취약점 스캔 (Trivy 설치 필요) |
 
 ---
 
-### `analyze` — Static Analysis
+### `analyze` — 정적 분석
 
-Detects image bloat causes without building. Exits with code 1 if findings exist (CI-friendly).
+빌드 없이 이미지 비대 원인을 탐지한다. 문제가 있으면 종료 코드 1을 반환한다 (CI 연동 가능).
 
 ```bash
 imgadvisor analyze -f Dockerfile
-imgadvisor analyze -f Dockerfile --json     # JSON output for CI integration
+imgadvisor analyze -f Dockerfile --json     # CI 연동용 JSON 출력
 ```
 
-**Output:**
+**출력 예시:**
 ```
   imgadvisor  ./Dockerfile
   base python:3.11  stages 1 (single-stage)  .dockerignore no
@@ -68,16 +67,16 @@ imgadvisor analyze -f Dockerfile --json     # JSON output for CI integration
 
 ---
 
-### `recommend` — Generate Optimized Dockerfile
+### `recommend` — 최적화 Dockerfile 생성
 
-Applies fixes automatically where possible and inserts inline comments for manual changes.
+수정 가능한 항목은 자동으로 적용하고, 수동 수정이 필요한 항목은 인라인 주석으로 표시한다.
 
 ```bash
 imgadvisor recommend -f Dockerfile -o optimized.Dockerfile
-imgadvisor recommend -f Dockerfile           # print to stdout
+imgadvisor recommend -f Dockerfile           # stdout으로 출력
 ```
 
-**Output:**
+**출력 예시:**
 ```
   imgadvisor  ./Dockerfile  3 FAIL  2 WARN  |  est. 580 ~ 1,040 MB
 
@@ -90,79 +89,82 @@ imgadvisor recommend -f Dockerfile           # print to stdout
    ...
 ```
 
-Auto-applied changes:
-- Base image replaced with recommended slim/distroless alternative
-- `apt-get install` rewritten to `apk add --no-cache` when switching to Alpine (safe packages only)
-- `# [imgadvisor:FAIL/WARN]` comments inserted above problem instructions
-- Multi-stage build template appended (Go / Rust / Java / Node / generic)
+자동 적용 항목:
+- 베이스 이미지를 slim/distroless 대안으로 교체
+- Alpine으로 전환 시 `apt-get install` → `apk add --no-cache` 자동 변환 (안전한 패키지만)
+- 문제 명령어 위에 `# [imgadvisor:FAIL/WARN]` 주석 삽입
+- `SINGLE_STAGE_BUILD` 탐지 시에만 언어별 멀티스테이지 템플릿 추가 (Go / Rust / Java / Node / 범용)
 
 ---
 
-### `layers` — Real Layer Size Breakdown
+### `layers` — 실제 레이어 크기 분석
 
-Builds the Dockerfile and shows how much each instruction contributes to the final image size.
-Uses `docker history --no-trunc` to get actual layer delta sizes.
+Dockerfile을 빌드한 뒤 각 명령어가 이미지 크기에 얼마나 기여하는지 보여준다.
+`docker history --no-trunc`로 실제 레이어 델타 크기를 가져온다.
 
 ```bash
 imgadvisor layers -f Dockerfile
 ```
 
-**Output:**
+**출력 예시:**
 ```
   imgadvisor  ./Dockerfile
-  layer analysis  847.1 MB  12 layers
+  image size 847.1 MB  layers 12  uncompressed layer content 1,204.3 MB
 
   ──────────────────────────────────────────────────────────────────────
-   38.3%  323.9 MB  RUN          apt-get update && apt-get install -y gcc...  [!]
-    9.7%   82.1 MB  RUN          pip install --no-cache-dir -r requirements...
-    6.6%   56.2 MB  COPY         . .                                          [!]
-   45.5%  384.9 MB  RUN          <base image layers>
+   26.9%  323.9 MB  RUN          apt-get update && apt-get install -y gcc...  [!]
+    6.8%   82.1 MB  RUN          pip install --no-cache-dir -r requirements...
+    4.7%   56.2 MB  COPY         . .                                          [!]
+   61.7%  742.1 MB  RUN          <base image layers>
     0.0%    0.0 MB  (5 metadata layers: ENV / CMD / WORKDIR / EXPOSE / ...)
   ──────────────────────────────────────────────────────────────────────
-  3 large layers  (>50 MB)  462.1 MB  (54.6% of total)
+  3 large layers  (>50 MB)  462.1 MB  (38.4% of uncompressed layers)
   run: imgadvisor recommend -f ./Dockerfile
 ```
 
-**What the sizes mean:**
-- Sizes are **uncompressed layer delta sizes** — same unit as `docker image ls` virtual size
-- Layers flagged with `[!]` are >= 50 MB
-- Zero-size metadata layers (ENV, CMD, WORKDIR, EXPOSE, ...) are grouped into a footer count
-- These are real measured values, not estimates
+**크기 의미:**
+- 크기는 **비압축 레이어 델타** — `docker history`와 동일한 단위
+- `[!]`가 붙은 레이어는 50 MB 이상
+- ENV, CMD, WORKDIR, EXPOSE 등 파일시스템 변경 없는 메타데이터 레이어는 하단에 개수만 표시
+- `image size`(docker inspect)와 `uncompressed layer content`(history 합산)가 다를 수 있는 이유: union filesystem에서 레이어 간 중복 제거 및 whiteout 처리 때문
 
-> Use `analyze` to find what to fix, `layers` to see which instructions are actually large.
+> `analyze`로 무엇을 고칠지 찾고, `layers`로 어떤 명령어가 실제로 큰지 확인하라.
 
 ---
 
-### `validate` — Compare Original vs Optimized (Actual Build)
+### `validate` — 원본 vs 최적화 실제 비교
 
-Builds both Dockerfiles with temporary tags, compares real image size and layer count,
-then removes both temporary images.
+원본과 최적화 Dockerfile을 모두 빌드해서 실제 이미지 크기와 레이어 수를 비교한다.
+비교 후 두 임시 이미지는 모두 삭제된다.
 
 ```bash
-# Step 1: generate optimized Dockerfile
+# 1단계: 최적화 Dockerfile 생성
 imgadvisor recommend -f Dockerfile -o optimized.Dockerfile
 
-# Step 2: build both and compare
+# 2단계: 두 Dockerfile 빌드 후 비교
 imgadvisor validate -f Dockerfile --optimized optimized.Dockerfile
 ```
 
-**Output:**
+**출력 예시:**
 ```
               original   optimized   saved
   image size   847.1 MB   423.2 MB   -423.9 MB (50.0%)
   layers           12          8    -4
 ```
 
-Both images are built with UUID-based temporary tags (`imgadvisor-orig-xxx`, `imgadvisor-opt-xxx`)
-and are always deleted after comparison — success or failure.
+두 이미지는 UUID 기반 임시 태그(`imgadvisor-orig-xxx`, `imgadvisor-opt-xxx`)로 빌드되고,
+성공/실패 여부에 관계없이 항상 삭제된다.
+
+> **주의:** validate는 `-o`로 저장한 파일을 그대로 빌드해서 비교하는 것이다.
+> 추가 최적화를 다시 적용하지 않는다.
 
 ---
 
-### `scan` — Trivy Pre-Build Vulnerability Scan
+### `scan` — Trivy 프리빌드 취약점 스캔
 
-Runs two Trivy scans without building an image:
-- `trivy config` — Dockerfile misconfiguration (CIS, NSA guidelines)
-- `trivy fs` — CVE scan of dependency lockfiles in the build context
+이미지 빌드 없이 두 가지 Trivy 스캔을 실행한다:
+- `trivy config` — Dockerfile 설정 오류 (CIS, NSA 가이드라인)
+- `trivy fs` — 빌드 컨텍스트의 의존성 lockfile CVE 스캔
 
 ```bash
 imgadvisor scan -f Dockerfile
@@ -171,54 +173,64 @@ imgadvisor scan -f Dockerfile --ignore-unfixed
 imgadvisor scan -f Dockerfile --json
 ```
 
-Requires [Trivy](https://aquasecurity.github.io/trivy) installed.
+[Trivy](https://aquasecurity.github.io/trivy) 설치 필요.
 
 ---
 
-## Recommended Workflow
+## 권장 워크플로우
 
 ```bash
-imgadvisor analyze   -f Dockerfile                          # 1. find issues
-imgadvisor layers    -f Dockerfile                          # 2. see which layers are large
-imgadvisor recommend -f Dockerfile -o optimized.Dockerfile  # 3. generate fix
-imgadvisor validate  -f Dockerfile --optimized optimized.Dockerfile  # 4. measure savings
+# 1. 문제 찾기
+imgadvisor analyze -f Dockerfile
+
+# 2. 어떤 레이어가 실제로 큰지 확인
+imgadvisor layers -f Dockerfile
+
+# 3. 최적화 Dockerfile 생성
+imgadvisor recommend -f Dockerfile -o optimized.Dockerfile
+
+# 4. 실제 절감량 측정
+imgadvisor validate -f Dockerfile --optimized optimized.Dockerfile
+
+# 5. 최적화 완료 후 빌드 → 실행 → 푸시
+docker build -f optimized.Dockerfile -t myapp:latest .
+docker run myapp:latest
+docker push myapp:latest
 ```
 
 ---
 
-## Detection Rules
+## 탐지 규칙
 
 ### `BASE_IMAGE_NOT_OPTIMIZED` · FAIL
 
-Detects base images with slim/alpine/distroless alternatives.
-**Smart recommendation**: inspects `CMD` / `ENTRYPOINT` / `COPY *.sh` to decide which tier is safe.
+slim/alpine/distroless 대안이 있는 베이스 이미지 탐지.
+**스마트 추천**: `CMD` / `ENTRYPOINT` / `COPY *.sh` 분석으로 어떤 티어가 안전한지 결정.
 
-| Signal | Recommended tier |
+| 신호 | 추천 티어 |
 |---|---|
-| `ENTRYPOINT ["/binary"]` exec-form only | distroless (no shell needed) |
-| `CMD "string"` or `COPY *.sh` | slim (shell required) |
-| Go / Rust + multi-stage | scratch |
-| No CMD/ENTRYPOINT found | slim (safe default) |
+| `ENTRYPOINT ["/binary"]` exec-form만 있음 | distroless (shell 불필요) |
+| `CMD "string"` 또는 `COPY *.sh` | slim (shell 필요) |
+| Go / Rust + 멀티스테이지 | scratch |
+| CMD/ENTRYPOINT 없음 | slim (안전한 기본값) |
 
-**apt package safety filter**: when Alpine is a candidate and the Dockerfile uses `apt-get install`,
-imgadvisor checks whether those packages can be safely translated to `apk`. If not, Alpine is
-excluded from recommendations to avoid broken builds.
+**apt 패키지 안전 필터**: Alpine이 후보일 때, Dockerfile의 `apt-get install` 패키지들이 Alpine에서도 동작하는지 확인한다. 알 수 없는 패키지가 하나라도 있으면 Alpine을 제외하고 slim을 추천한다.
 
-| Scenario | Result |
+| 시나리오 | 결과 |
 |---|---|
-| `apt-get install libpq-dev` (known Alpine equivalent) | Alpine kept, `apt-get` → `apk add` in recommend |
-| `apt-get install libsomething-custom` (unknown) | Alpine excluded, slim recommended instead |
-| Complex apt logic with `\|\|` / subshells | Alpine excluded (cannot safely translate) |
+| `apt-get install libpq-dev` (Alpine 동등 패키지 알려짐) | Alpine 유지, recommend에서 apt→apk 자동 변환 |
+| `apt-get install libsomething-custom` (알 수 없음) | Alpine 제외, slim 추천 |
+| `\|\|` / 서브셸 포함 복잡한 apt 로직 | Alpine 제외 (안전하게 변환 불가) |
 
-Supported base images (30+ patterns):
+지원 베이스 이미지 (30개 이상):
 
-| Category | Detected | Recommended |
+| 카테고리 | 탐지 대상 | 추천 |
 |---|---|---|
-| Python | `python:3.x`, `python:3.x.y`, `python:latest` | slim -> alpine -> distroless |
-| Node | `node:20`, `node:lts`, `node:current` | slim -> alpine -> distroless |
-| Java | `openjdk:17`, `eclipse-temurin:17-jdk` | JRE -> distroless |
-| Go | `golang:1.22` | scratch (after multi-stage) |
-| Rust | `rust:1.77` | scratch or debian-slim (after multi-stage) |
+| Python | `python:3.x`, `python:3.x.y`, `python:latest` | slim → alpine → distroless |
+| Node | `node:20`, `node:lts`, `node:current` | slim → alpine → distroless |
+| Java | `openjdk:17`, `eclipse-temurin:17-jdk` | JRE → distroless |
+| Go | `golang:1.22` | scratch (멀티스테이지 후) |
+| Rust | `rust:1.77` | scratch 또는 debian-slim (멀티스테이지 후) |
 | Ubuntu | `ubuntu:22.04`, `ubuntu:jammy/focal/noble` | ubuntu-minimal, debian-slim |
 | Debian | `debian:bookworm/bullseye/buster` | debian-slim |
 | Nginx | `nginx:1.25`, `nginx:stable`, `nginx:latest` | nginx-alpine |
@@ -227,120 +239,120 @@ Supported base images (30+ patterns):
 | MySQL | `mysql:8.0` | mysql-debian |
 | MariaDB | `mariadb:11.0` | mariadb-focal |
 | PHP | `php:8.2`, `php:8.2-fpm` | php-alpine, php-fpm-alpine |
-| Ruby | `ruby:3.3` | ruby-slim -> ruby-alpine |
+| Ruby | `ruby:3.3` | ruby-slim → ruby-alpine |
 | .NET | `dotnet/sdk:8.0` | dotnet/runtime, dotnet/aspnet |
 | Kafka | `confluentinc/cp-kafka` | bitnami/kafka |
-| CentOS | `centos:7/8` | almalinux / rockylinux (EOL warning) |
-| Amazon Linux | `amazonlinux:2` | amazonlinux:2023 (AL2 EOL warning) |
+| CentOS | `centos:7/8` | almalinux / rockylinux (EOL 경고) |
+| Amazon Linux | `amazonlinux:2` | amazonlinux:2023 (AL2 EOL 경고) |
 
-Already-optimal images are skipped: `-slim`, `-alpine`, `-minimal`, `distroless`, `scratch`, `busybox`
+이미 최적화된 이미지는 스킵: `-slim`, `-alpine`, `-minimal`, `distroless`, `scratch`, `busybox`
 
 ---
 
 ### `BUILD_TOOLS_IN_FINAL_STAGE` · FAIL
 
-Detects compilers and build utilities installed in the final stage that are not needed at runtime.
+런타임에 불필요한 빌드 도구가 final stage에 설치되어 있는 경우 탐지.
 
-| Category | Packages |
+| 카테고리 | 패키지 |
 |---|---|
-| C/C++ compilers | `gcc`, `g++`, `clang`, `llvm` |
-| Build systems | `make`, `cmake`, `ninja-build`, `build-essential`, `automake`, `autoconf` |
-| Java build | `maven`, `gradle`, `ant` |
+| C/C++ 컴파일러 | `gcc`, `g++`, `clang`, `llvm` |
+| 빌드 시스템 | `make`, `cmake`, `ninja-build`, `build-essential`, `automake`, `autoconf` |
+| Java 빌드 | `maven`, `gradle`, `ant` |
 | Rust | `cargo`, `rustc` |
-| Dev headers | `python3-dev`, `libpq-dev`, `libssl-dev`, `libffi-dev`, `libblas-dev` |
-| Misc | `wget`, `binutils`, `gfortran`, `pkg-config` |
+| 개발 헤더 | `python3-dev`, `libpq-dev`, `libssl-dev`, `libffi-dev`, `libblas-dev` |
+| 기타 | `wget`, `binutils`, `gfortran`, `pkg-config` |
 
-Fix: move build tools to a `builder` stage, `COPY --from=builder` only the artifacts.
-Estimated savings: **100 ~ 400 MB**
+수정 방법: 빌드 도구는 `builder` 스테이지로 이동, 아티팩트만 `COPY --from=builder`로 복사.
+예상 절감: **100 ~ 400 MB**
 
 ---
 
-### Cache Cleanup Rules · WARN
+### 캐시 정리 규칙 · WARN
 
-Detects package manager installs without cache cleanup:
+캐시 정리 없이 패키지를 설치한 경우 탐지:
 
-| Rule | Trigger | Fix |
+| 규칙 | 트리거 | 수정 방법 |
 |---|---|---|
-| `APT_CACHE_NOT_CLEANED` | `apt-get install` without `rm -rf /var/lib/apt/lists/*` | Add cleanup to same RUN |
-| `PIP_CACHE_NOT_DISABLED` | `pip install` without `--no-cache-dir` | Add flag |
-| `APK_CACHE_NOT_DISABLED` | `apk add` without `--no-cache` | Add flag |
-| `NPM_CACHE_NOT_CLEANED` | `npm install/ci` without `npm cache clean --force` | Add cache clean |
-| `YARN_CACHE_NOT_CLEANED` | `yarn install` without `yarn cache clean` | Add cache clean |
-| `PNPM_CACHE_NOT_CLEANED` | `pnpm install` without `pnpm store prune` | Add prune |
-| `GEM_CACHE_NOT_CLEANED` | `gem install` without `rm -rf ~/.gem` | Add cleanup |
-| `COMPOSER_CACHE_NOT_CLEANED` | `composer install` without `composer clear-cache` | Add clear-cache |
-| `MVN_CACHE_NOT_CLEANED` | `mvn install` without cleanup | Add cleanup |
-| `GRADLE_CACHE_NOT_CLEANED` | `gradle build` without cache cleanup | Add cleanup |
-| `CARGO_CACHE_NOT_CLEANED` | `cargo build` without `rm -rf ~/.cargo/registry` | Add cleanup |
-| `DNFYUM_CACHE_NOT_CLEANED` | `dnf/yum install` without `clean all` | Add `&& dnf clean all` |
+| `APT_CACHE_NOT_CLEANED` | `apt-get install` 후 `rm -rf /var/lib/apt/lists/*` 없음 | 같은 RUN에 정리 추가 |
+| `PIP_CACHE_NOT_DISABLED` | `pip install`에 `--no-cache-dir` 없음 | 플래그 추가 |
+| `APK_CACHE_NOT_DISABLED` | `apk add`에 `--no-cache` 없음 | 플래그 추가 |
+| `NPM_CACHE_NOT_CLEANED` | `npm install/ci` 후 `npm cache clean --force` 없음 | 캐시 정리 추가 |
+| `YARN_CACHE_NOT_CLEANED` | `yarn install` 후 `yarn cache clean` 없음 | 캐시 정리 추가 |
+| `PNPM_CACHE_NOT_CLEANED` | `pnpm install` 후 `pnpm store prune` 없음 | prune 추가 |
+| `GEM_CACHE_NOT_CLEANED` | `gem install` 후 `rm -rf ~/.gem` 없음 | 정리 추가 |
+| `COMPOSER_CACHE_NOT_CLEANED` | `composer install` 후 `composer clear-cache` 없음 | clear-cache 추가 |
+| `MVN_CACHE_NOT_CLEANED` | `mvn install` 후 정리 없음 | 정리 추가 |
+| `GRADLE_CACHE_NOT_CLEANED` | `gradle build` 후 캐시 정리 없음 | 정리 추가 |
+| `CARGO_CACHE_NOT_CLEANED` | `cargo build` 후 `rm -rf ~/.cargo/registry` 없음 | 정리 추가 |
+| `DNFYUM_CACHE_NOT_CLEANED` | `dnf/yum install` 후 `clean all` 없음 | `&& dnf clean all` 추가 |
 
-Estimated savings: **10 ~ 200 MB** per rule
+예상 절감: 규칙당 **10 ~ 200 MB**
 
 ---
 
 ### `BROAD_COPY_SCOPE` · FAIL / WARN
 
-Detects `COPY . .` or `COPY . /app` — copies the entire build context.
+`COPY . .` 또는 `COPY . /app` — 빌드 컨텍스트 전체를 복사하는 패턴 탐지.
 
-| Condition | Severity | Risk |
+| 조건 | 심각도 | 위험 |
 |---|---|---|
-| No `.dockerignore` | FAIL | `.git`, `node_modules`, `.env`, secrets may be included |
-| `.dockerignore` exists | WARN | Explicit paths are still safer |
+| `.dockerignore` 없음 | FAIL | `.git`, `node_modules`, `.env`, secrets 등이 모두 포함될 수 있음 |
+| `.dockerignore` 있음 | WARN | 위험은 줄었지만 명시적 경로가 더 안전 |
 
-Fix: create `.dockerignore` and use explicit `COPY src/ /app/src/` paths.
-Estimated savings: **50 ~ 300 MB**
+수정 방법: `.dockerignore` 생성 후 `COPY src/ /app/src/`처럼 명시적 경로 사용.
+예상 절감: **50 ~ 300 MB**
 
 ---
 
 ### `SINGLE_STAGE_BUILD` · FAIL
 
-Detects build-only base images (`golang:`, `rust:`, `maven:`, `eclipse-temurin:*-jdk`, `dotnet/sdk:`)
-used in a single-stage build, or any Dockerfile that installs build tools in a single stage.
+빌드 전용 베이스 이미지(`golang:`, `rust:`, `maven:`, `eclipse-temurin:*-jdk`, `dotnet/sdk:`)를
+single-stage로 사용하거나, 빌드 도구를 single-stage에서 설치하는 경우 탐지.
 
-Appends a language-specific multi-stage template to the recommended Dockerfile:
+이 규칙이 탐지됐을 때만 recommend에서 언어별 멀티스테이지 템플릿을 추가한다:
 
-| Language | Builder stage | Runtime stage |
+| 언어 | 빌더 스테이지 | 런타임 스테이지 |
 |---|---|---|
 | Go | `golang:alpine` | `scratch` |
 | Rust | `rust:slim` | `debian:bookworm-slim` |
 | Java | `eclipse-temurin:jdk` | `eclipse-temurin:jre` |
 | .NET | `dotnet/sdk` | `dotnet/aspnet` |
-| Node | `node:alpine` (full deps) | `node:alpine` (prod deps only) |
-| Generic | `<build-image>` | `<runtime-image-slim>` |
+| Node | `node:alpine` (전체 의존성) | `node:alpine` (prod 의존성만) |
+| 범용 | `<build-image>` | `<runtime-image-slim>` |
 
-Estimated savings: **150 ~ 600 MB**
+예상 절감: **150 ~ 600 MB**
 
 ---
 
-## CI Integration
+## CI 연동
 
 ```yaml
 # GitHub Actions
-- name: Dockerfile analysis
+- name: Dockerfile 분석
   run: |
     pip install git+https://github.com/0206pdh/dockimage_scanner.git
     imgadvisor analyze -f Dockerfile
-  # exits with code 1 on any FAIL finding -- blocks the pipeline
+  # FAIL 탐지 시 종료 코드 1 반환 → 파이프라인 차단
 ```
 
 ---
 
-## Project Structure
+## 프로젝트 구조
 
 ```
 imgadvisor/
-├── main.py            # CLI entry point (Typer)
-├── parser.py          # Dockerfile -> DockerfileIR
-├── analyzer.py        # Rule runner
-├── recommender.py     # Optimized Dockerfile generator
-├── validator.py       # Real build comparison (Docker daemon)
-├── layer_analyzer.py  # docker history layer breakdown (Docker daemon)
-├── display.py         # Rich terminal output (compact linter style)
-├── models.py          # Shared data models
+├── main.py            # CLI 진입점 (Typer)
+├── parser.py          # Dockerfile → DockerfileIR
+├── analyzer.py        # 규칙 실행기
+├── recommender.py     # 최적화 Dockerfile 생성기
+├── validator.py       # 실제 빌드 비교 (Docker 데몬 필요)
+├── layer_analyzer.py  # docker history 레이어 분석 (Docker 데몬 필요)
+├── display.py         # Rich 터미널 출력 (compact linter 스타일)
+├── models.py          # 공유 데이터 모델
 └── rules/
-    ├── base_image.py      # Base image rules (30+ patterns, shell detection)
-    ├── build_tools.py     # Build tool detection
-    ├── cache_cleanup.py   # Package manager cache rules (12 PMs)
-    ├── copy_scope.py      # COPY scope detection
-    └── multi_stage.py     # Single-stage detection + multi-stage templates
+    ├── base_image.py      # 베이스 이미지 규칙 (30개 이상 패턴, shell 탐지)
+    ├── build_tools.py     # 빌드 도구 탐지
+    ├── cache_cleanup.py   # 패키지 매니저 캐시 규칙 (12종)
+    ├── copy_scope.py      # COPY 범위 탐지
+    └── multi_stage.py     # Single-stage 탐지 + 멀티스테이지 템플릿
 ```
