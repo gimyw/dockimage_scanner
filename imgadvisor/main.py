@@ -1,3 +1,12 @@
+"""
+imgadvisor CLI 진입점.
+
+Typer를 사용해 세 가지 서브커맨드를 제공한다:
+  analyze  : Dockerfile 정적 분석 (이미지 비대 요인 탐지)
+  recommend: 최적화 Dockerfile 초안 생성
+  validate : 원본 vs 최적화 이미지 실제 빌드 비교 (Docker 데몬 필요)
+  scan     : Trivy pre-build 취약점 및 설정 문제 스캔
+"""
 from __future__ import annotations
 
 from pathlib import Path
@@ -9,14 +18,15 @@ from imgadvisor import display, recommender, trivy_scanner, validator
 from imgadvisor.analyzer import analyze
 from imgadvisor.parser import parse
 
+# Typer 앱 인스턴스 — 서브커맨드를 등록하는 루트 앱
 app = typer.Typer(
     name="imgadvisor",
     help=(
-        "Dockerfile pre-build 정적 분석 및 이미지 경량화 어드바이저.\n\n"
-        "빌드 전에 이미지 비대 요인을 예측하고 최적화 방안을 추천합니다."
+        "Dockerfile pre-build static analyzer and image optimization advisor.\n\n"
+        "Predicts image bloat before build and recommends optimizations."
     ),
-    add_completion=False,
-    no_args_is_help=True,
+    add_completion=False,  # 자동완성 스크립트 설치 옵션 비활성화
+    no_args_is_help=True,  # 인수 없이 실행하면 도움말 출력
 )
 
 
@@ -24,30 +34,43 @@ app = typer.Typer(
 def cmd_analyze(
     dockerfile: Path = typer.Option(
         ..., "--dockerfile", "-f",
-        help="분석할 Dockerfile 경로",
+        help="Path to the Dockerfile to analyze",
         exists=True, readable=True,
     ),
     json_out: bool = typer.Option(
         False, "--json",
-        help="결과를 JSON으로 출력",
+        help="Output results as JSON",
     ),
 ) -> None:
     """
-    Dockerfile 정적 분석 — 이미지 비대 요인 탐지 및 최적화 추천.
+    Analyze a Dockerfile for image bloat and optimization issues.
+
+    Runs all built-in rules against the Dockerfile without building an image:
+    - Base image optimization (slim/alpine/distroless)
+    - Build tools left in final stage
+    - Package manager cache not cleaned
+    - Broad COPY scope
+    - Single-stage build with build tools
+
+    Exits with code 1 if any findings are detected (CI-friendly).
 
     \b
-    예시:
+    Examples:
         imgadvisor analyze --dockerfile ./Dockerfile
         imgadvisor analyze -f Dockerfile --json
     """
+    # 1. Dockerfile 파싱 → DockerfileIR 생성
     ir = parse(str(dockerfile))
+    # 2. 모든 규칙 실행 → Finding 목록
     findings = analyze(ir)
 
+    # 3. 결과 출력 (JSON 또는 컴팩트 linter 형식)
     if json_out:
         display.print_json_result(ir, findings)
     else:
         display.print_analysis(ir, findings)
 
+    # 4. Finding이 있으면 exit code 1 (CI 파이프라인에서 빌드 차단 가능)
     if findings:
         raise typer.Exit(code=1)
 
@@ -56,40 +79,45 @@ def cmd_analyze(
 def cmd_recommend(
     dockerfile: Path = typer.Option(
         ..., "--dockerfile", "-f",
-        help="원본 Dockerfile 경로",
+        help="Path to the original Dockerfile",
         exists=True, readable=True,
     ),
     output: Optional[Path] = typer.Option(
         None, "--output", "-o",
-        help="최적화 Dockerfile 저장 경로 (미지정시 stdout 출력)",
+        help="Path to save the optimized Dockerfile (stdout if not specified)",
     ),
 ) -> None:
     """
-    최적화 Dockerfile 생성.
+    Generate an optimized Dockerfile based on analysis findings.
 
-    분석 결과를 바탕으로 베이스 이미지 교체, 캐시 정리 패턴 추가 등을
-    자동 적용한 Dockerfile 초안을 생성합니다.
+    Applies direct patches (e.g. base image replacement) and inserts
+    inline comments for issues that require manual restructuring.
 
     \b
-    예시:
+    Examples:
         imgadvisor recommend -f Dockerfile -o optimized.Dockerfile
-        imgadvisor recommend -f Dockerfile          # stdout 출력
+        imgadvisor recommend -f Dockerfile          # print to stdout
     """
+    # analyze와 동일하게 파싱 + 분석 먼저 수행
     ir = parse(str(dockerfile))
     findings = analyze(ir)
 
+    # 분석 결과를 먼저 출력해 사용자가 무엇이 수정됐는지 확인할 수 있게 함
     display.print_analysis(ir, findings)
 
     if not findings:
-        typer.echo("이미 최적화된 Dockerfile입니다. 추천 사항 없음.")
+        typer.echo("Dockerfile is already optimized. No recommendations.")
         return
 
+    # Finding을 바탕으로 최적화 Dockerfile 생성
     optimized = recommender.recommend(ir, findings)
 
     if output:
+        # 파일로 저장
         output.write_text(optimized, encoding="utf-8")
-        typer.echo(f"\n✅  최적화 Dockerfile 저장 완료: {output}")
+        typer.echo(f"\n  Optimized Dockerfile saved: {output}")
     else:
+        # stdout으로 출력 (파이프 처리 가능)
         display.print_recommended_dockerfile(optimized)
 
 
@@ -97,26 +125,28 @@ def cmd_recommend(
 def cmd_validate(
     dockerfile: Path = typer.Option(
         ..., "--dockerfile", "-f",
-        help="원본 Dockerfile 경로",
+        help="Path to the original Dockerfile",
         exists=True, readable=True,
     ),
     optimized: Path = typer.Option(
         ..., "--optimized",
-        help="최적화 Dockerfile 경로",
+        help="Path to the optimized Dockerfile",
         exists=True, readable=True,
     ),
 ) -> None:
     """
-    원본 vs 최적화 Dockerfile 실제 빌드 후 크기/레이어 비교.
+    Build both Dockerfiles and compare image size and layer count.
 
-    Docker 데몬이 실행 중이어야 합니다.
+    Requires a running Docker daemon. Both images are built with temporary
+    tags and deleted after comparison.
 
     \b
-    예시:
+    Examples:
         imgadvisor validate -f Dockerfile --optimized optimized.Dockerfile
     """
-    typer.echo("🔨  원본 이미지 빌드 중...")
+    typer.echo("  Building original image...")
     try:
+        # Docker 데몬으로 두 이미지를 빌드하고 결과 비교
         result = validator.validate(str(dockerfile), str(optimized))
     except RuntimeError as e:
         typer.echo(f"[ERROR] {e}", err=True)
@@ -129,7 +159,7 @@ def cmd_validate(
 def cmd_scan(
     dockerfile: Path = typer.Option(
         ..., "--dockerfile", "-f",
-        help="Trivy pre-build 검사를 수행할 Dockerfile 경로",
+        help="Path to the Dockerfile to scan",
         exists=True, readable=True,
     ),
     severity: str = typer.Option(
@@ -138,7 +168,7 @@ def cmd_scan(
     ),
     ignore_unfixed: bool = typer.Option(
         False, "--ignore-unfixed",
-        help="수정 버전이 없는 취약점은 제외",
+        help="Exclude vulnerabilities with no available fix",
     ),
     timeout: int = typer.Option(
         300, "--timeout",
@@ -147,15 +177,18 @@ def cmd_scan(
     ),
     json_out: bool = typer.Option(
         False, "--json",
-        help="결과를 JSON으로 출력",
+        help="Output results as JSON",
     ),
 ) -> None:
     """
     Run Trivy pre-build checks for Dockerfile config and build-context dependencies.
 
-    This command intentionally does not build an image. Instead it combines:
-    - `trivy config` for Dockerfile misconfigurations
-    - `trivy fs` for dependency vulnerabilities in the build context
+    Does NOT build an image. Combines two Trivy scans:
+    - `trivy config`: Dockerfile misconfiguration detection
+    - `trivy fs`: dependency vulnerability detection from lockfiles in the build context
+
+    Requires Trivy to be installed (https://aquasecurity.github.io/trivy).
+    Exits with code 1 if any findings are detected.
 
     \b
     Examples:
@@ -179,6 +212,7 @@ def cmd_scan(
     else:
         display.print_trivy_scan(result)
 
+    # Finding이 있으면 exit code 1 (CI에서 빌드 차단 가능)
     if result.total_findings:
         raise typer.Exit(code=1)
 

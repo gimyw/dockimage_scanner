@@ -1,19 +1,21 @@
 """
 광범위한 COPY 범위 탐지.
 
-COPY . . 또는 COPY . /app 처럼 컨텍스트 전체를 복사하는 패턴 감지.
-.dockerignore 부재 여부도 함께 고려.
+`COPY . .` 또는 `COPY . /app` 처럼 빌드 컨텍스트 전체를 복사하는 패턴을 탐지한다.
+.dockerignore가 없으면 .git, node_modules, .env 등 민감하거나 불필요한 파일까지
+이미지에 포함되어 크기가 커지고 보안 위험이 생긴다.
+
+심각도 기준:
+  - .dockerignore 없음: HIGH (모든 파일이 포함될 위험)
+  - .dockerignore 있음: MEDIUM (일부 파일은 걸러지지만 여전히 위험)
 """
 from __future__ import annotations
 
 from imgadvisor.models import DockerfileIR, Finding, Severity
 
-# Broad COPY scope rule.
-# final stage에서 `COPY . ...`를 쓰면 소스 외에도 테스트, 문서, 캐시, VCS
-# 메타데이터, 심지어 비밀 파일까지 유입될 수 있어 이미지가 쉽게 비대해진다.
-
+# .dockerignore 예시 — 사용자에게 권장하는 최소 구성
 _DOCKERIGNORE_EXAMPLE = (
-    ".dockerignore 예시:\n"
+    ".dockerignore example:\n"
     "    .git\n"
     "    .github\n"
     "    __pycache__\n"
@@ -31,8 +33,22 @@ _DOCKERIGNORE_EXAMPLE = (
 
 
 def check(ir: DockerfileIR) -> list[Finding]:
-    # 이 rule은 shell-form COPY만 다룬다.
-    # JSON-array COPY 구문까지 정확히 다루려면 parser가 구조화된 인자를 제공해야 한다.
+    """
+    final stage의 COPY 명령에서 컨텍스트 전체 복사 패턴을 탐지한다.
+
+    탐지 조건:
+    - `--from=` 없는 COPY 명령 (스테이지 간 복사는 제외)
+    - 첫 번째 인수가 "." (현재 컨텍스트 전체)
+
+    Finding 당 하나의 COPY 명령에 대응하므로, 여러 `COPY . X` 가 있으면
+    여러 Finding이 생성된다.
+
+    Args:
+        ir: Dockerfile 중간 표현
+
+    Returns:
+        광범위한 COPY가 탐지된 Finding 목록
+    """
     final = ir.final_stage
     if final is None:
         return []
@@ -42,16 +58,18 @@ def check(ir: DockerfileIR) -> list[Finding]:
     for instr in final.copy_instructions:
         args = instr.arguments
 
-        # multi-stage artifact copy는 대개 의도된 패턴이므로 제외한다.
+        # --from=<stage> 가 있는 COPY는 멀티-스테이지 간 복사이므로 무시
         if "--from=" in args:
             continue
 
         parts = args.split()
-        # 현재는 `COPY . <dest>` 형태만 탐지한다.
+        # 첫 번째 인수가 "." 이어야 컨텍스트 전체 복사 패턴
         if not parts or parts[0] != ".":
             continue
 
+        # .dockerignore 유무에 따라 심각도와 메시지를 다르게 설정
         if not ir.has_dockerignore:
+            # .dockerignore가 없으면 .git, node_modules, .env 등 모두 포함될 수 있어 HIGH
             severity = Severity.HIGH
             recommendation = (
                 "no .dockerignore — all files in context will be included\n\n"
@@ -64,6 +82,7 @@ def check(ir: DockerfileIR) -> list[Finding]:
             )
             saving_min, saving_max = 90, 300
         else:
+            # .dockerignore가 있어도 명시적 경로 복사가 더 안전 → MEDIUM
             severity = Severity.MEDIUM
             recommendation = (
                 ".dockerignore exists but COPY . . still risks including unwanted files\n\n"
