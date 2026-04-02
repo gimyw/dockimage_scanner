@@ -14,7 +14,7 @@ from typing import Optional
 
 import typer
 
-from imgadvisor import display, recommender, trivy_scanner, validator
+from imgadvisor import display, layer_analyzer, recommender, trivy_scanner, validator
 from imgadvisor.analyzer import analyze
 from imgadvisor.parser import parse
 
@@ -215,6 +215,40 @@ def cmd_scan(
     # Finding이 있으면 exit code 1 (CI에서 빌드 차단 가능)
     if result.total_findings:
         raise typer.Exit(code=1)
+
+
+@app.command(name="layers")
+def cmd_layers(
+    dockerfile: Path = typer.Option(
+        ..., "--dockerfile", "-f",
+        help="Path to the Dockerfile to analyze",
+        exists=True, readable=True,
+    ),
+) -> None:
+    """
+    Build the Dockerfile and show a per-layer size breakdown.
+
+    Builds a temporary image, runs `docker history` to extract each layer's
+    size and origin instruction, then removes the temporary image.
+
+    Useful for identifying which RUN/COPY instructions contribute the most
+    to image size and prioritizing optimization efforts.
+
+    Requires a running Docker daemon.
+
+    \b
+    Examples:
+        imgadvisor layers -f Dockerfile
+    """
+    typer.echo("  Building image for layer analysis...")
+    try:
+        # Build temp image, collect docker history, cleanup
+        analysis = layer_analyzer.analyze(str(dockerfile))
+    except RuntimeError as e:
+        typer.echo(f"[ERROR] {e}", err=True)
+        raise typer.Exit(code=1)
+
+    display.print_layers(analysis)
 
 
 if __name__ == "__main__":

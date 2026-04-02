@@ -259,6 +259,68 @@ def print_trivy_json_result(result: TrivyScanResult) -> None:
     console.print_json(json.dumps(data, ensure_ascii=False, indent=2))
 
 
+def print_layers(analysis: "LayerAnalysis") -> None:  # type: ignore[name-defined]
+    """
+    Compact layer breakdown from docker history.
+
+    Shows each layer's size, percentage, instruction type, and command.
+    Layers >= 50 MB are flagged with [!]. Zero-size metadata layers
+    (ENV, CMD, WORKDIR, etc.) are grouped into a footer count.
+    """
+    from imgadvisor.layer_analyzer import LayerAnalysis  # local import avoids circular
+
+    console.print()
+    console.print(f"  [bold]imgadvisor[/bold]  [dim]{analysis.dockerfile_path}[/dim]")
+    console.print(
+        f"  [dim]layer analysis[/dim]  "
+        f"[bold]{analysis.total_mb:.1f} MB[/bold]  "
+        f"[dim]{analysis.layer_count} layers[/dim]"
+    )
+    console.print()
+    console.print(Rule(style="dim"))
+
+    _LARGE_THRESHOLD = 50 * 1_000_000  # 50 MB in SI bytes
+
+    nonempty = analysis.nonempty_layers
+    zero_count = analysis.layer_count - len(nonempty)
+
+    for layer in nonempty:
+        pct = analysis.size_pct(layer)
+        mb = layer.size_bytes / 1_000_000  # SI MB for consistency with docker history
+        large_flag = "  [bold red][!][/bold red]" if layer.size_bytes >= _LARGE_THRESHOLD else ""
+
+        console.print(
+            f"  [green]{pct:5.1f}%[/green]  "
+            f"[bold]{mb:7.1f} MB[/bold]  "
+            f"[dim]{layer.instruction:<12}[/dim]  "
+            f"{layer.display_cmd}"
+            + large_flag
+        )
+
+    if zero_count:
+        console.print(
+            f"  [dim]  0.0%      0.0 MB  "
+            f"({zero_count} metadata layers: ENV / CMD / WORKDIR / EXPOSE / ...)[/dim]"
+        )
+
+    console.print(Rule(style="dim"))
+
+    large_layers = [l for l in nonempty if l.size_bytes >= _LARGE_THRESHOLD]
+    if large_layers:
+        large_mb = sum(l.size_bytes for l in large_layers) / 1_000_000
+        large_pct = sum(analysis.size_pct(l) for l in large_layers)
+        console.print(
+            f"  [bold red]{len(large_layers)} large layer{'s' if len(large_layers) > 1 else ''}[/bold red]"
+            f"  [dim](>50 MB)[/dim]  [bold]{large_mb:.1f} MB[/bold]"
+            f"  [dim]({large_pct:.1f}% of total)[/dim]"
+        )
+    else:
+        console.print("  [bold green]No large layers detected.[/bold green]")
+
+    console.print(f"  [dim]run:[/dim] imgadvisor recommend -f {analysis.dockerfile_path}")
+    console.print()
+
+
 def print_json_result(ir: DockerfileIR, findings: list[Finding]) -> None:
     data = {
         "dockerfile": ir.path,
