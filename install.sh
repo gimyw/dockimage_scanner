@@ -12,7 +12,7 @@ info()  { echo -e "${GREEN}[imgadvisor]${NC} $*"; }
 warn()  { echo -e "${YELLOW}[imgadvisor]${NC} $*"; }
 error() { echo -e "${RED}[imgadvisor] ERROR:${NC} $*" >&2; exit 1; }
 
-# ── Python 3.11+ 탐색 ────────────────────────────────────────────────────────
+# ── Python 3.11+ 탐색 ──────────────────────────────────────────────────────
 PYTHON=""
 for cmd in python3.13 python3.12 python3.11 python3 python; do
   if command -v "$cmd" &>/dev/null; then
@@ -23,61 +23,72 @@ for cmd in python3.13 python3.12 python3.11 python3 python; do
     fi
   fi
 done
-
-[ -z "$PYTHON" ] && error "Python 3.${MIN_PYTHON_MINOR}+ 이 필요합니다."
+[ -z "$PYTHON" ] && error "Python 3.${MIN_PYTHON_MINOR}+ is required."
 info "Python: $($PYTHON --version)"
 
-# ── git 확인 ────────────────────────────────────────────────────────────────
+# ── git 확인 ───────────────────────────────────────────────────────────────
 if ! command -v git &>/dev/null; then
-  info "git 설치 중..."
+  info "Installing git..."
   if command -v apt-get &>/dev/null; then
     apt-get install -y git 2>/dev/null || sudo apt-get install -y git
   elif command -v yum &>/dev/null; then
     yum install -y git 2>/dev/null || sudo yum install -y git
   else
-    error "git 이 없습니다. 수동으로 설치하세요."
+    error "git not found. Please install it manually."
   fi
 fi
 
-# ── venv 생성 (시스템 Python 건드리지 않음) ──────────────────────────────────
-info "가상환경 생성 중: ${VENV_DIR}"
+# ── venv 생성 ──────────────────────────────────────────────────────────────
+info "Creating virtualenv: ${VENV_DIR}"
 "$PYTHON" -m venv "$VENV_DIR"
 
 VENV_PIP="${VENV_DIR}/bin/pip"
-VENV_PYTHON="${VENV_DIR}/bin/python"
 
-# ── venv 안에서 pip 업그레이드 후 설치 ───────────────────────────────────────
-info "설치 중... (github.com/${REPO})"
+# ── 설치 ───────────────────────────────────────────────────────────────────
+info "Installing from github.com/${REPO} ..."
 "$VENV_PIP" install --quiet --upgrade pip
 "$VENV_PIP" install --quiet --force-reinstall "git+https://github.com/${REPO}.git"
 
-# ── ~/.local/bin 에 심볼릭 링크 ──────────────────────────────────────────────
+# ── ~/.local/bin 심볼릭 링크 ───────────────────────────────────────────────
 mkdir -p "$BIN_DIR"
 ln -sf "${VENV_DIR}/bin/${TOOL}" "${BIN_DIR}/${TOOL}"
-info "심볼릭 링크: ${BIN_DIR}/${TOOL} -> ${VENV_DIR}/bin/${TOOL}"
+info "Symlink: ${BIN_DIR}/${TOOL}"
 
-# ── PATH 확인 ────────────────────────────────────────────────────────────────
+# ── PATH 자동 등록 ─────────────────────────────────────────────────────────
+# ~/.local/bin 이 PATH에 없으면 셸 RC 파일에 자동으로 추가
+PATH_LINE="export PATH=\"\$HOME/.local/bin:\$PATH\""
+
+_add_to_rc() {
+  local rc="$1"
+  if [ -f "$rc" ] && ! grep -qF '.local/bin' "$rc"; then
+    echo "" >> "$rc"
+    echo "# added by imgadvisor installer" >> "$rc"
+    echo "$PATH_LINE" >> "$rc"
+    info "Added PATH to $rc"
+  fi
+}
+
 if [[ ":$PATH:" != *":${BIN_DIR}:"* ]]; then
+  # bash
+  _add_to_rc "${HOME}/.bashrc"
+  _add_to_rc "${HOME}/.bash_profile"
+  # zsh
+  _add_to_rc "${HOME}/.zshrc"
+  # 현재 세션에도 즉시 적용
   export PATH="${BIN_DIR}:$PATH"
-  warn "PATH에 ${BIN_DIR} 추가됨. 영구 적용:"
-  warn "  echo 'export PATH=\"\$HOME/.local/bin:\$PATH\"' >> ~/.bashrc && source ~/.bashrc"
 fi
 
-# ── 완료 ─────────────────────────────────────────────────────────────────────
-if command -v "$TOOL" &>/dev/null; then
-  info "설치 완료!"
-  echo ""
-  echo "  사용법:"
-  echo "    imgadvisor analyze   --dockerfile Dockerfile"
-  echo "    imgadvisor recommend --dockerfile Dockerfile --output optimized.Dockerfile"
-  echo "    imgadvisor validate  --dockerfile Dockerfile --optimized optimized.Dockerfile"
-  echo ""
-  echo "  도움말: imgadvisor --help"
-  echo ""
-  echo "  업데이트:"
-  echo "    ${VENV_PIP} install --upgrade git+https://github.com/${REPO}.git"
+# ── 완료 ───────────────────────────────────────────────────────────────────
+info "Done! Run: imgadvisor --help"
+echo ""
+echo "  imgadvisor analyze   -f Dockerfile"
+echo "  imgadvisor recommend -f Dockerfile -o optimized.Dockerfile"
+echo "  imgadvisor scan      -f Dockerfile"
+echo ""
+
+if [[ ":$PATH:" != *":${BIN_DIR}:"* ]]; then
+  warn "Reload your shell to use the command:"
+  warn "  source ~/.bashrc   (or open a new terminal)"
 else
-  warn "설치 완료됐으나 명령어를 찾을 수 없습니다."
-  warn "새 터미널을 열거나: export PATH=\"\$HOME/.local/bin:\$PATH\""
-  warn "직접 실행: ${VENV_DIR}/bin/${TOOL} --help"
+  warn "If 'imgadvisor' is not found, run: source ~/.bashrc"
 fi
