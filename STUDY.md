@@ -539,7 +539,53 @@ def size_pct(self, layer):
 
 ---
 
-## 7. Finding이 없을 때 (이미 최적화된 경우)
+## 7. FAIL vs WARN 기준
+
+### 핵심 논리
+
+```
+구조적 문제 (설계를 바꿔야 해결됨)   →  FAIL (HIGH)
+습관적 문제 (명령어 하나 추가하면 됨) →  WARN (MEDIUM)
+```
+
+### FAIL로 분류하는 조건
+
+| 규칙 | FAIL인 이유 |
+|---|---|
+| `BASE_IMAGE_NOT_OPTIMIZED` | 베이스 이미지 자체가 수백 MB 낭비. FROM 한 줄 교체가 필요한 구조적 결정 |
+| `BUILD_TOOLS_IN_FINAL_STAGE` | 런타임에 전혀 불필요한 도구가 포함됨. 멀티스테이지 분리가 필요 |
+| `BROAD_COPY_SCOPE` (.dockerignore 없음) | `.git`, `node_modules`, `.env`, secrets가 이미지에 포함될 수 있음. 보안 위험 |
+| `SINGLE_STAGE_BUILD` | 빌드 전용 이미지를 런타임까지 그대로 사용. 멀티스테이지 재설계 필요 |
+
+### WARN으로 분류하는 조건
+
+| 규칙 | WARN인 이유 |
+|---|---|
+| `APT_CACHE_NOT_CLEANED` 등 캐시 규칙 12개 | 캐시가 레이어에 남는 건 실수지만, 설계 자체는 문제없음. `&& rm -rf ...` 한 줄 추가로 해결 |
+| `BROAD_COPY_SCOPE` (.dockerignore 있음) | 보안 위험은 줄었음. 명시적 경로가 더 나은 습관이지만 구조적 문제는 아님 |
+
+### CI 동작과의 연결
+
+```
+FAIL 존재  →  exit code 1  →  CI 파이프라인 차단
+WARN만 존재 →  exit code 1  →  동일하게 차단 (모든 finding이 차단)
+finding 없음 →  exit code 0  →  통과
+```
+
+> 현재는 FAIL/WARN 모두 exit 1을 반환한다. WARN을 통과시키고 싶으면
+> `imgadvisor analyze -f Dockerfile --json`으로 출력 후 직접 파싱하거나,
+> 향후 `--fail-on FAIL` 옵션 추가를 고려할 수 있다.
+
+### 새 규칙 심각도 결정 기준
+
+새 규칙을 추가할 때 심각도를 결정하는 기준:
+
+- **FAIL**: 수정하려면 Dockerfile 구조를 바꿔야 하거나, 보안 위험이 있거나, 절감량이 100 MB 이상
+- **WARN**: 명령어 플래그 하나 추가/수정으로 해결되고, 보안 위험 없고, 절감량이 수십 MB 수준
+
+---
+
+## 8. Finding이 없을 때 (이미 최적화된 경우)
 
 각 규칙이 스킵하는 조건 요약:
 
