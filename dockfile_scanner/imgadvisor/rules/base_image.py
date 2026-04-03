@@ -9,7 +9,7 @@ from __future__ import annotations
 import re
 from typing import Optional
 
-from imgadvisor.models import DockerfileIR, Finding, Patch, Severity
+from imgadvisor.models import DockerfileIR, Finding, Patch, Severity, Stage
 
 # Runtime base image optimization rule.
 # Only the final stage is inspected because it directly determines runtime image
@@ -239,6 +239,164 @@ _RULES: list[tuple[str, list[dict]]] = [
     ]),
 ]
 
+# Alpine rewrites are only safe when apt-installed packages can be translated
+# with high confidence. Otherwise the rule should prefer a Debian/slim variant
+# and avoid generating a Dockerfile that fails during validate/build.
+_APT_TO_APK_PACKAGE_MAP: dict[str, str] = {
+    "build-essential": "build-base",
+    "libpq-dev": "postgresql-dev",
+    "libssl-dev": "openssl-dev",
+    "pkg-config": "pkgconf",
+}
+
+_APK_PASSTHROUGH_PACKAGES: set[str] = {
+    "bash",
+    "ca-certificates",
+    "coreutils",
+    "curl",
+    "gcc",
+    "g++",
+    "git",
+    "grep",
+    "libffi-dev",
+    "make",
+    "musl-dev",
+    "openssl",
+    "python3-dev",
+    "sed",
+    "tar",
+    "unzip",
+    "zip",
+}
+
+def _is_no_shell_image(image_template: str) -> bool:
+    """Return True if the image requires no shell (distroless or scratch)."""
+    return "distroless" in image_template or image_template.startswith("scratch")
+
+
+def _is_alpine_image(image_template: str) -> bool:
+    """Return True if the image template targets Alpine Linux."""
+    return "-alpine" in image_template or image_template.startswith("alpine:")
+
+
+def _filter_recs_by_shell(recs: list[dict], shell_status: str) -> list[dict]:
+    """
+    Filter recommendation candidates based on shell requirement.
+
+    - no_shell:    all options OK (exec-form only → distroless is safe)
+    - needs_shell: exclude distroless/scratch (they have no /bin/sh)
+    - unknown:     exclude distroless/scratch as a safe default
+    """
+    if shell_status == "no_shell":
+        return recs
+    filtered = [r for r in recs if not _is_no_shell_image(r["image"])]
+    return filtered if filtered else recs  # fallback if every candidate was excluded
+
+
+def _extract_apt_packages(run_text: str) -> Optional[list[str]]:
+    """
+    Extract package names from a straightforward apt install command.
+
+    Supported shape:
+      apt-get update && apt-get install -y <packages...>
+
+    More complex shell logic deliberately returns None so the caller can avoid
+    unsafe Alpine rewrites.
+    """
+    normalized = re.sub(r"\s+", " ", run_text.strip())
+    match = re.search(r"(?:apt-get|apt)\s+install\s+(.+)", normalized, re.IGNORECASE)
+    if not match:
+        return None
+
+    tail = re.split(r"\s*(?:&&|;|\|\|)\s*", match.group(1), maxsplit=1)[0].strip()
+    if not tail:
+        return None
+
+    packages = [token for token in tail.split() if not token.startswith("-")]
+    return packages or None
+
+
+def _can_translate_apt_packages_to_alpine(packages: list[str]) -> bool:
+    """Return True if every package has a confident Alpine equivalent."""
+    for package in packages:
+        if package in _APT_TO_APK_PACKAGE_MAP:
+            continue
+        if package in _APK_PASSTHROUGH_PACKAGES:
+            continue
+        return False
+    return True
+
+
+def _filter_recs_by_pkg_manager(stage: Stage, recs: list[dict]) -> tuple[list[dict], str]:
+    """
+    Remove Alpine candidates when the final stage uses apt packages that cannot
+    be translated safely.
+    """
+    apt_packages: list[str] = []
+    for instr in stage.run_instructions:
+        if not re.search(r"\b(?:apt-get|apt)\b", instr.arguments, re.IGNORECASE):
+            continue
+
+        packages = _extract_apt_packages(instr.arguments)
+        if not packages:
+            filtered = [r for r in recs if not _is_alpine_image(r["image"])]
+            return (filtered if filtered else recs), "complex apt command detected"
+        apt_packages.extend(packages)
+
+    if not apt_packages:
+        return recs, ""
+
+    if _can_translate_apt_packages_to_alpine(apt_packages):
+        return recs, "apt packages can be translated to alpine"
+
+    filtered = [r for r in recs if not _is_alpine_image(r["image"])]
+    return (filtered if filtered else recs), "apt packages are not safely translatable to alpine"
+
+
+def _detect_shell_requirement(stage: Stage) -> tuple[str, str]:
+    """
+    Inspect the stage's instructions to determine if a shell is needed at runtime.
+
+    Detection signals (in priority order):
+      needs_shell:
+        - SHELL directive present
+        - CMD or ENTRYPOINT in shell form (argument does not start with '[')
+        - COPY *.sh  (shell scripts copied into the image)
+      no_shell:
+        - exec-form ENTRYPOINT ["binary", ...] and none of the above signals
+      unknown:
+        - no CMD / ENTRYPOINT found → default to slim (safe choice)
+
+    Returns:
+        (status, signal_description)
+        status: "needs_shell" | "no_shell" | "unknown"
+    """
+    has_exec_form_entrypoint = False
+
+    for instr in stage.instructions:
+        if instr.instruction == "SHELL":
+            return "needs_shell", "SHELL directive found"
+
+        if instr.instruction in ("CMD", "ENTRYPOINT"):
+            args = instr.arguments.strip()
+            if not args.startswith("["):
+                # Shell form: e.g.  CMD npm start  or  ENTRYPOINT /start.sh
+                return "needs_shell", f"shell-form {instr.instruction} detected"
+            # Exec form: ["binary", "arg", ...]
+            if instr.instruction == "ENTRYPOINT":
+                has_exec_form_entrypoint = True
+
+        if instr.instruction == "COPY":
+            # Shell scripts copied into the image → /bin/sh will be needed
+            if re.search(r"\.sh\b", instr.arguments):
+                return "needs_shell", "COPY *.sh detected"
+
+    if has_exec_form_entrypoint:
+        return "no_shell", "exec-form ENTRYPOINT only → distroless safe"
+
+    return "unknown", "no CMD/ENTRYPOINT found"
+
+
 # 이미 경량 이미지로 보이거나 stage alias를 참조하는 경우는 skip.
 _ALREADY_OPTIMAL = re.compile(
     r"^("
@@ -273,18 +431,36 @@ def check(ir: DockerfileIR) -> list[Finding]:
             continue
 
         version = m.group(1) if m.lastindex else ""
-        # 절감폭 최대치를 기준으로 대표 추천안을 고른다. 단순하고 일관적이지만,
-        # 운영 난이도까지 반영한 "가장 무난한" 선택과는 다를 수 있다.
-        best = max(recs, key=lambda r: r["max"])
+
+        # Detect whether the Dockerfile needs a shell at runtime, then filter
+        # candidates accordingly before picking the one with maximum savings.
+        shell_status, shell_signal = _detect_shell_requirement(final)
+        filtered_recs = _filter_recs_by_shell(recs, shell_status)
+        filtered_recs, pkg_signal = _filter_recs_by_pkg_manager(final, filtered_recs)
+
+        best = max(filtered_recs, key=lambda r: r["max"])
         best_image = best["image"].replace("{v}", version)
         note_str = f" ({best['note']})" if best.get("note") else ""
 
-        alternatives = [r["image"].replace("{v}", version) for r in recs[1:]]
+        # Show alternatives from the same filtered pool (excluded no-shell images
+        # are intentionally hidden when shell is required)
+        alternatives = [
+            r["image"].replace("{v}", version)
+            for r in filtered_recs
+            if r is not best
+        ]
         alt_str = ""
         if alternatives:
             alt_str = "\n  alternatives: " + ", ".join(alternatives)
 
-        recommendation = f"→ {best_image}{note_str}{alt_str}"
+        # Only surface the signal when it actually changed the recommendation
+        signal_str = ""
+        if shell_status != "unknown":
+            signal_str = f"\n  signal: {shell_signal}"
+        if pkg_signal:
+            signal_str += f"\n  package-manager: {pkg_signal}"
+
+        recommendation = f"→ {best_image}{note_str}{signal_str}{alt_str}"
 
         # Patch는 단순 이미지 교체가 가능한 경우에만 만든다.
         # 예: "scratch (after multi-stage)"는 안내 문구이지 즉시 치환 가능한

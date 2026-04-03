@@ -1,0 +1,46 @@
+# 테스트용 - 의도적으로 문제를 많이 포함한 Dockerfile
+# imgadvisor로 분석하면 FAIL/WARN이 다수 탐지됨
+
+FROM python:3.11
+
+# 빌드 도구 설치 (런타임에 불필요) + 캐시 미정리
+RUN apt-get update && apt-get install -y \
+    gcc \
+    g++ \
+    make \
+    cmake \
+    build-essential \
+    libpq-dev \
+    libssl-dev \
+    libffi-dev \
+    wget \
+    curl \
+    git \
+    vim
+
+# 작업 디렉토리
+WORKDIR /app
+
+# 전체 컨텍스트 복사 (.dockerignore 없음)
+COPY . .
+
+# pip 캐시 미정리
+RUN pip install flask sqlalchemy psycopg2-binary \
+    requests numpy pandas scikit-learn \
+    celery redis gunicorn
+
+# 불필요한 빌드 스텝
+RUN wget https://github.com/jwilder/dockerize/releases/download/v0.6.1/dockerize-linux-amd64-v0.6.1.tar.gz \
+    && tar -C /usr/local/bin -xzvf dockerize-linux-amd64-v0.6.1.tar.gz \
+    && rm dockerize-linux-amd64-v0.6.1.tar.gz
+
+# 캐시 정리를 별도 RUN으로 (이미 레이어에 기록된 후라 의미 없음)
+RUN rm -rf /var/lib/apt/lists/*
+
+ENV FLASK_APP=app.py
+ENV FLASK_ENV=production
+ENV PYTHONDONTWRITEBYTECODE=1
+
+EXPOSE 5000
+
+CMD flask run --host=0.0.0.0 --port=5000
