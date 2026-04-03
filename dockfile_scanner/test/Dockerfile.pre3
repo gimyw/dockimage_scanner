@@ -1,0 +1,21 @@
+# 테스트 3: requirements 기반 Flask 앱, 개발 서버 엔트리포인트
+FROM python:3.11
+
+RUN apt-get update && apt-get install -y \
+    gcc \
+    libpq-dev \
+    git \
+    wget
+
+WORKDIR /app
+
+COPY requirements.txt ./
+RUN pip install -r requirements.txt
+
+COPY . .
+
+ENV FLASK_APP=app.py
+
+EXPOSE 5000
+
+CMD flask run --host=0.0.0.0 --port=5000

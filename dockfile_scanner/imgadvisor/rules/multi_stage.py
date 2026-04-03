@@ -122,7 +122,7 @@ def _build_python_template(ir: DockerfileIR, final: Stage) -> str:
         for instr in final.instructions
         if instr.instruction in {"EXPOSE", "CMD", "ENTRYPOINT", "USER", "HEALTHCHECK", "STOPSIGNAL"}
     ]
-    runtime_command_override = recommended_python_runtime_command(final)
+    runtime_command_override = recommended_python_runtime_command(ir, final)
     if runtime_command_override is not None:
         runtime_only_lines = [
             instr.raw

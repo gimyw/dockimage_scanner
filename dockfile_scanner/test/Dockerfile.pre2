@@ -1,0 +1,17 @@
+# 테스트 2: FastAPI + Uvicorn 단일 스테이지, 캐시 미정리
+FROM python:3.11
+
+RUN apt-get update && apt-get install -y \
+    gcc \
+    make \
+    libffi-dev
+
+WORKDIR /app
+
+COPY . .
+
+RUN pip install fastapi uvicorn sqlalchemy
+
+EXPOSE 8000
+
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]

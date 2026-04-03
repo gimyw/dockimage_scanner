@@ -13,7 +13,10 @@ Current scope:
 """
 from __future__ import annotations
 
+import ast
 import re
+import tomllib
+from pathlib import Path
 
 from imgadvisor.models import DockerInstruction, DockerfileIR, Finding, Severity, Stage
 
@@ -87,7 +90,7 @@ def check(ir: DockerfileIR) -> list[Finding]:
             )
         )
 
-    findings.extend(_check_python_runtime_command(final))
+    findings.extend(_check_python_runtime_command(ir, final))
     return findings
 
 
@@ -146,7 +149,7 @@ def recommended_python_env_lines(final: Stage) -> list[str]:
     ]
 
 
-def recommended_python_runtime_command(final: Stage) -> list[str] | None:
+def recommended_python_runtime_command(ir: DockerfileIR, final: Stage) -> list[str] | None:
     """
     안전하게 추론 가능한 경우에만 더 나은 runtime command를 생성한다.
 
@@ -157,6 +160,8 @@ def recommended_python_runtime_command(final: Stage) -> list[str] | None:
     추론이 애매하면 None을 반환한다. 이 경우 caller는 원래 CMD/ENTRYPOINT를
     그대로 유지해야 하며, rule은 경고만 제공한다.
     """
+    installed = detect_python_runtime_packages(ir, final)
+
     for instr in final.instructions:
         if instr.instruction not in {"CMD", "ENTRYPOINT"}:
             continue
@@ -165,21 +170,19 @@ def recommended_python_runtime_command(final: Stage) -> list[str] | None:
         lowered = command.lower()
 
         if "flask run" in lowered:
-            target = _infer_flask_app_target(final)
+            if "gunicorn" not in installed:
+                return None
+            target = _infer_flask_app_target(ir, final)
             if target is None:
                 return None
             port = _extract_option_value(command, "--port") or "5000"
             bind = f"0.0.0.0:{port}"
-            return [f'CMD ["gunicorn", "-w", "2", "-b", "{bind}", "{target}"]']
-
-        if "uvicorn" in lowered and "--workers" not in lowered and "gunicorn" not in lowered:
-            rewritten = _append_json_or_shell_flag(command, "--workers", "2")
-            return [f"{instr.instruction} {rewritten}"]
+            return [f'CMD ["gunicorn", "-b", "{bind}", "{target}"]']
 
     return None
 
 
-def _check_python_runtime_command(final: Stage) -> list[Finding]:
+def _check_python_runtime_command(ir: DockerfileIR, final: Stage) -> list[Finding]:
     """
     Python 컨테이너에서 흔한 runtime command 문제를 Finding으로 변환한다.
 
@@ -196,9 +199,9 @@ def _check_python_runtime_command(final: Stage) -> list[Finding]:
         lowered = command.lower()
 
         if "flask run" in lowered:
-            inferred = recommended_python_runtime_command(final)
+            inferred = recommended_python_runtime_command(ir, final)
             recommendation = (
-                "Use a production WSGI server."
+                "Use a production WSGI server. Auto-rewrite only happens when the Flask entry module can be inferred from the source tree."
                 if inferred is None
                 else "Use a production WSGI server, for example:\n" + "\n".join(inferred)
             )
@@ -216,11 +219,8 @@ def _check_python_runtime_command(final: Stage) -> list[Finding]:
             continue
 
         if "uvicorn" in lowered and "--workers" not in lowered and "gunicorn" not in lowered:
-            inferred = recommended_python_runtime_command(final)
             recommendation = (
-                'Set an explicit worker count for CPU-bound deployment.'
-                if inferred is None
-                else "Set an explicit worker count for CPU-bound deployment, for example:\n" + "\n".join(inferred)
+                "Set an explicit worker count for deployment. Do not auto-fix this blindly because the right value depends on CPU, memory, and the server model."
             )
             findings.append(
                 Finding(
@@ -235,6 +235,127 @@ def _check_python_runtime_command(final: Stage) -> list[Finding]:
             )
 
     return findings
+
+
+def detect_python_runtime_packages(ir: DockerfileIR, final: Stage) -> set[str]:
+    """
+    Dockerfile 과 프로젝트 의존성 파일을 함께 읽어서 런타임 관련 Python 패키지를 수집한다.
+
+    현재 자동 엔트리포인트 최적화에 직접 쓰는 패키지는 아래 세 개뿐이다.
+    - flask
+    - gunicorn
+    - uvicorn
+
+    판단 근거:
+    - requirements/constraints 파일
+    - pyproject.toml 의 dependencies / optional-dependencies
+    - Dockerfile 의 `pip install ...` inline 명령
+    """
+    context_dir = Path(ir.path).resolve().parent
+    detected: set[str] = set()
+
+    for pattern in ("requirements*.txt", "constraints*.txt"):
+        for path in context_dir.glob(pattern):
+            detected.update(_read_requirement_like_file(path))
+
+    pyproject_path = context_dir / "pyproject.toml"
+    if pyproject_path.is_file():
+        detected.update(_read_pyproject_dependencies(pyproject_path))
+
+    for instr in final.run_instructions:
+        detected.update(_read_inline_pip_install(instr.arguments))
+
+    interesting = {"flask", "gunicorn", "uvicorn"}
+    return detected & interesting
+
+
+def _read_requirement_like_file(path: Path) -> set[str]:
+    """
+    requirements 계열 파일에서 패키지 이름만 느슨하게 추출한다.
+    """
+    packages: set[str] = set()
+    try:
+        content = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return packages
+
+    for raw_line in content.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or line.startswith("-"):
+            continue
+        line = line.split("#", 1)[0].strip()
+        name = re.split(r"[<>=!~\[\s;]", line, maxsplit=1)[0].strip()
+        if name:
+            packages.add(name.lower().replace("_", "-"))
+    return packages
+
+
+def _read_pyproject_dependencies(path: Path) -> set[str]:
+    """
+    pyproject.toml 에서 PEP 621 / Poetry 스타일 dependency 이름을 읽는다.
+    """
+    packages: set[str] = set()
+    try:
+        data = tomllib.loads(path.read_text(encoding="utf-8", errors="replace"))
+    except (OSError, tomllib.TOMLDecodeError):
+        return packages
+
+    project = data.get("project", {})
+    for item in project.get("dependencies", []) or []:
+        packages.update(_extract_dependency_name(item))
+
+    optional_deps = project.get("optional-dependencies", {}) or {}
+    for items in optional_deps.values():
+        for item in items or []:
+            packages.update(_extract_dependency_name(item))
+
+    poetry = (((data.get("tool", {}) or {}).get("poetry", {})) or {})
+    poetry_deps = poetry.get("dependencies", {}) or {}
+    for name in poetry_deps.keys():
+        if name != "python":
+            packages.add(str(name).lower().replace("_", "-"))
+
+    poetry_groups = poetry.get("group", {}) or {}
+    for group in poetry_groups.values():
+        deps = (group or {}).get("dependencies", {}) or {}
+        for name in deps.keys():
+            if name != "python":
+                packages.add(str(name).lower().replace("_", "-"))
+
+    return packages
+
+
+def _extract_dependency_name(spec: str) -> set[str]:
+    """
+    `flask>=3.0`, `uvicorn[standard]>=0.30` 같은 dependency spec 에서 이름만 뽑는다.
+    """
+    item = spec.strip()
+    if not item:
+        return set()
+    name = re.split(r"[<>=!~\[\s;]", item, maxsplit=1)[0].strip()
+    return {name.lower().replace("_", "-")} if name else set()
+
+
+def _read_inline_pip_install(run_arguments: str) -> set[str]:
+    """
+    `RUN pip install ...` 형태의 inline 설치 명령에서 패키지 이름을 뽑는다.
+
+    아주 공격적으로 파싱하지는 않는다. URL, 옵션, `-r requirements.txt` 같은 값은 제외한다.
+    """
+    packages: set[str] = set()
+    match = re.search(r"\bpip(?:3)?\s+install\b(.+)", run_arguments, re.IGNORECASE)
+    if not match:
+        return packages
+
+    tail = re.split(r"\s*(?:&&|;|\|\|)\s*", match.group(1), maxsplit=1)[0]
+    for token in tail.split():
+        token = token.strip()
+        if not token or token.startswith("-") or "://" in token or token.startswith("."):
+            continue
+        name = re.split(r"[<>=!~\[\s;]", token, maxsplit=1)[0].strip()
+        if name:
+            packages.add(name.lower().replace("_", "-"))
+    return packages
 
 
 def _parse_env_assignments(arguments: str) -> list[tuple[str, str]]:
@@ -272,7 +393,7 @@ def _suggest_env_line(final: Stage) -> int | None:
     return 1
 
 
-def _infer_flask_app_target(final: Stage) -> str | None:
+def _infer_flask_app_target(ir: DockerfileIR, final: Stage) -> str | None:
     """
     `gunicorn module:app` 형식의 target을 Flask 설정에서 추론한다.
 
@@ -285,19 +406,141 @@ def _infer_flask_app_target(final: Stage) -> str | None:
     - `FLASK_APP=main`     -> `main:app`
     - `FLASK_APP=src.app:app` -> 그대로 사용
     """
+    context_dir = Path(ir.path).resolve().parent
     env_map, _ = collect_python_env_map(final)
     flask_app = env_map.get("FLASK_APP")
+
+    for module_hint, file_path in _candidate_flask_files(context_dir, flask_app):
+        target = _infer_flask_target_from_file(file_path, module_hint)
+        if target is not None:
+            return target
+
+    return None
+
+
+def _candidate_flask_files(context_dir: Path, flask_app: str | None) -> list[tuple[str, Path]]:
+    """
+    FLASK_APP 와 일반적인 Flask 엔트리 파일 이름을 기준으로 검사 후보를 만든다.
+
+    반환 형식:
+    - module hint: gunicorn 에 넣을 module 부분 후보
+    - file path: 실제로 읽어볼 Python 파일 경로
+
+    자동 변환은 이 후보 파일을 실제로 읽어서 app 객체나 factory 가 확인될 때만 허용한다.
+    """
+    candidates: list[tuple[str, Path]] = []
+    seen: set[Path] = set()
+
     if flask_app:
         cleaned = flask_app.strip().strip('"').strip("'")
-        if ":" in cleaned:
-            return cleaned
         if cleaned.endswith(".py"):
-            return f"{cleaned[:-3]}:app"
-        if re.fullmatch(r"[A-Za-z_][\w\.]*", cleaned):
-            return f"{cleaned}:app"
+            path = (context_dir / cleaned).resolve()
+            module_hint = cleaned[:-3].replace("/", ".").replace("\\", ".")
+            if path not in seen:
+                candidates.append((module_hint, path))
+                seen.add(path)
+        elif ":" in cleaned:
+            module_hint = cleaned.split(":", 1)[0]
+            path = (context_dir / (module_hint.replace(".", "/") + ".py")).resolve()
+            if path not in seen:
+                candidates.append((module_hint, path))
+                seen.add(path)
+        elif re.fullmatch(r"[A-Za-z_][\w\.]*", cleaned):
+            module_hint = cleaned
+            path = (context_dir / (module_hint.replace(".", "/") + ".py")).resolve()
+            if path not in seen:
+                candidates.append((module_hint, path))
+                seen.add(path)
 
-    # Conservative default only when the project is already using the common app.py form.
-    return "app:app"
+    for module_hint in ("app", "main", "wsgi"):
+        path = (context_dir / f"{module_hint}.py").resolve()
+        if path not in seen:
+            candidates.append((module_hint, path))
+            seen.add(path)
+
+    return candidates
+
+
+def _infer_flask_target_from_file(file_path: Path, module_hint: str) -> str | None:
+    """
+    Python 소스 파일을 실제로 읽어서 gunicorn target 을 추론한다.
+
+    허용하는 경우:
+    - `name = Flask(...)` 형태의 직접 app 객체
+    - `def create_app(...): ...` 형태의 app factory
+
+    둘 다 확인되지 않으면 자동 변환하지 않는다.
+    """
+    if not file_path.exists() or file_path.suffix != ".py":
+        return None
+
+    try:
+        source = file_path.read_text(encoding="utf-8", errors="replace")
+        tree = ast.parse(source, filename=str(file_path))
+    except (OSError, SyntaxError, ValueError):
+        return None
+
+    object_name = _find_flask_app_object_name(tree)
+    if object_name is not None:
+        return f"{module_hint}:{object_name}"
+
+    factory_name = _find_flask_app_factory_name(tree)
+    if factory_name is not None:
+        return f"{module_hint}:{factory_name}()"
+
+    return None
+
+
+def _find_flask_app_object_name(tree: ast.AST) -> str | None:
+    """
+    `app = Flask(__name__)` 처럼 직접 생성된 Flask 객체 이름을 찾는다.
+    """
+    for node in tree.body if isinstance(tree, ast.Module) else []:
+        if not isinstance(node, ast.Assign):
+            continue
+        if not _is_flask_constructor_call(node.value):
+            continue
+        for target in node.targets:
+            if isinstance(target, ast.Name):
+                return target.id
+    return None
+
+
+def _find_flask_app_factory_name(tree: ast.AST) -> str | None:
+    """
+    `create_app()` 패턴을 아주 보수적으로 찾아 gunicorn factory target 으로 쓸지 판단한다.
+
+    함수명만 보는 것이 아니라, 파일 안에 Flask 관련 import 가 있을 때만 허용한다.
+    """
+    has_flask_import = any(
+        (isinstance(node, ast.ImportFrom) and node.module == "flask")
+        or (
+            isinstance(node, ast.Import)
+            and any(alias.name == "flask" for alias in node.names)
+        )
+        for node in ast.walk(tree)
+    )
+    if not has_flask_import:
+        return None
+
+    for node in tree.body if isinstance(tree, ast.Module) else []:
+        if isinstance(node, ast.FunctionDef) and node.name == "create_app":
+            return node.name
+    return None
+
+
+def _is_flask_constructor_call(node: ast.AST) -> bool:
+    """
+    AST 노드가 `Flask(...)` 생성 호출인지 확인한다.
+    """
+    if not isinstance(node, ast.Call):
+        return False
+    func = node.func
+    if isinstance(func, ast.Name):
+        return func.id == "Flask"
+    if isinstance(func, ast.Attribute):
+        return func.attr == "Flask"
+    return False
 
 
 def _extract_option_value(command: str, option: str) -> str | None:

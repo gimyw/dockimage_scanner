@@ -1,0 +1,21 @@
+# 테스트 1: Flask 개발 서버, broad COPY, 빌드 도구 포함
+FROM python:3.11
+
+RUN apt-get update && apt-get install -y \
+    gcc \
+    g++ \
+    build-essential \
+    curl
+
+WORKDIR /app
+
+COPY . .
+
+RUN pip install flask gunicorn requests pandas
+
+ENV FLASK_APP=app.py
+ENV FLASK_ENV=production
+
+EXPOSE 5000
+
+CMD flask run --host=0.0.0.0 --port=5000
