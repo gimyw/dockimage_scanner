@@ -1,11 +1,10 @@
 """
-빌드 도구가 final stage에 잔존하는지 탐지.
+빌드 도구가 final stage에 남아 있는지 검사하는 rule.
 
-런타임에는 불필요한 컴파일러, 빌드 시스템, 개발 헤더 등이
-final stage의 RUN 명령에서 설치되면 이미지 크기가 불필요하게 커진다.
-
-올바른 해결책: 멀티-스테이지 빌드를 사용해 builder stage에서만
-빌드 도구를 설치하고, runtime stage에는 빌드 결과물만 COPY한다.
+final stage는 실제 배포되는 런타임 이미지이므로, 여기에 컴파일러나 개발
+헤더가 남아 있으면 이미지 크기와 공격 표면이 함께 커진다. 이 rule은
+"빌드는 builder stage에서, 실행은 runtime stage에서"라는 기본 원칙을
+어긴 흔적을 찾는다.
 """
 from __future__ import annotations
 
@@ -13,30 +12,21 @@ import re
 
 from imgadvisor.models import DockerfileIR, Finding, Severity
 
-# 런타임에 불필요한 빌드 도구 목록
-# 정규식에서 + 같은 특수문자는 이스케이프 처리 (g++, clang++ 등)
+# final stage에 남아 있으면 보통 멀티스테이지 분리 대상이 되는 도구들
 _BUILD_TOOLS: list[str] = [
-    # C/C++ 컴파일러 — 컴파일 후에는 불필요
     "gcc", "g\\+\\+", "clang", "clang\\+\\+", "llvm",
-    # 빌드 시스템 — 소스 컴파일 후에는 불필요
     "make", "cmake", "ninja-build", "automake", "autoconf", "libtool",
     "build-essential", "pkg-config",
-    # 바이너리 유틸 — 개발/디버그용
     "binutils", "gfortran",
-    # Java 빌드 도구 — JAR 생성 후에는 불필요
     "maven", "gradle", "ant",
-    # Rust 빌드 도구 — 바이너리 컴파일 후에는 불필요
     "cargo", "rustc",
-    # 개발 헤더 — C 확장 컴파일 후에는 불필요
     "python3-dev", "python-dev", "libpython3-dev",
     "libpq-dev", "libssl-dev", "libffi-dev",
     "libblas-dev", "liblapack-dev",
-    # 네트워크 다운로드 도구 — 설치 후에는 불필요
     "wget",
 ]
 
-# 각 도구 이름을 \b 단어 경계를 가진 정규식 패턴으로 컴파일
-# 예: "gcc" → re.compile(r"\bgcc\b", re.IGNORECASE)
+# 문자열 검색 성능과 일관성을 위해 rule 로딩 시 정규식을 미리 컴파일한다.
 _PATTERNS: list[re.Pattern] = [
     re.compile(rf"\b{tool}\b", re.IGNORECASE) for tool in _BUILD_TOOLS
 ]
@@ -44,45 +34,36 @@ _PATTERNS: list[re.Pattern] = [
 
 def check(ir: DockerfileIR) -> list[Finding]:
     """
-    final stage의 RUN 명령에서 빌드 도구 설치 패턴을 탐지한다.
+    final stage의 RUN 명령에서 빌드 전용 도구가 남아 있는지 검사한다.
 
-    탐지 로직:
-    1. final stage의 모든 RUN 명령을 순회
-    2. 각 RUN arguments에서 빌드 도구 패턴을 검색
-    3. 발견된 도구 이름을 수집하고 첫 번째 발견 줄 번호를 기록
-    4. 발견된 도구가 있으면 Finding 하나를 반환 (도구별 개별 Finding이 아님)
+    판단 절차:
+    1. final stage의 모든 RUN instruction을 순회한다.
+    2. `_BUILD_TOOLS` 패턴이 하나라도 매칭되는지 확인한다.
+    3. 발견된 도구명을 중복 없이 수집한다.
+    4. 한 개 이상 발견되면 Finding 1건으로 묶어서 반환한다.
 
-    여러 빌드 도구가 있어도 하나의 Finding으로 묶어서 반환한다.
-    최대 6개까지 나열하고 나머지는 "and N more"로 표시한다.
-
-    Args:
-        ir: Dockerfile 중간 표현
-
-    Returns:
-        빌드 도구가 탐지되면 Finding 하나를 담은 리스트, 없으면 빈 리스트
+    이 함수는 도구별로 Finding을 여러 건 만들지 않는다. 사용자가 보기에
+    중요한 것은 "이 runtime 이미지가 아직 빌드 도구를 포함하고 있다"는
+    사실이기 때문이다.
     """
     final = ir.final_stage
     if final is None:
         return []
 
-    found: list[str] = []             # 발견된 빌드 도구 이름 목록
-    first_line_no: int | None = None  # 처음 발견된 줄 번호
+    found: list[str] = []
+    first_line_no: int | None = None
 
     for instr in final.run_instructions:
         for tool_re, tool_name in zip(_PATTERNS, _BUILD_TOOLS):
-            # 출력용 이름: 이스케이프된 \+\+ 를 실제 ++ 로 복원
             clean_name = tool_name.replace("\\+\\+", "++")
-            # 이미 발견된 도구는 중복 추가하지 않음
             if tool_re.search(instr.arguments) and clean_name not in found:
                 found.append(clean_name)
-                # 첫 번째 발견 줄 번호만 기록 (대표 위치)
                 if first_line_no is None:
                     first_line_no = instr.line_no
 
     if not found:
         return []
 
-    # 출력용 도구 목록 (최대 6개 + "and N more")
     tools_display = ", ".join(f"`{t}`" for t in found[:6])
     if len(found) > 6:
         tools_display += f" and {len(found) - 6} more"

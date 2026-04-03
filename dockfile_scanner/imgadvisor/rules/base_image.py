@@ -270,22 +270,35 @@ _APK_PASSTHROUGH_PACKAGES: set[str] = {
 }
 
 def _is_no_shell_image(image_template: str) -> bool:
-    """Return True if the image requires no shell (distroless or scratch)."""
+    """
+    추천 후보가 shell 없는 이미지인지 판정한다.
+
+    distroless, scratch 계열은 용량 절감에는 유리하지만 `/bin/sh`가 없어서
+    shell-form CMD나 쉘 스크립트 entrypoint와 충돌할 수 있다.
+    """
     return "distroless" in image_template or image_template.startswith("scratch")
 
 
 def _is_alpine_image(image_template: str) -> bool:
-    """Return True if the image template targets Alpine Linux."""
+    """
+    추천 후보가 Alpine 계열인지 판정한다.
+
+    Alpine은 작지만 musl libc 기반이라 Debian/Ubuntu 계열과 런타임 호환성이
+    다를 수 있으므로, 별도 필터링 기준에서 사용한다.
+    """
     return "-alpine" in image_template or image_template.startswith("alpine:")
 
 
 def _filter_recs_by_shell(recs: list[dict], shell_status: str) -> list[dict]:
     """
-    Filter recommendation candidates based on shell requirement.
+    stage의 shell 필요 여부에 따라 추천 후보를 걸러낸다.
 
-    - no_shell:    all options OK (exec-form only → distroless is safe)
-    - needs_shell: exclude distroless/scratch (they have no /bin/sh)
-    - unknown:     exclude distroless/scratch as a safe default
+    상태별 정책:
+    - `no_shell`: exec-form entrypoint만 쓰면 distroless/scratch 허용
+    - `needs_shell`: shell 없는 후보 제거
+    - `unknown`: 보수적으로 shell 없는 후보 제거
+
+    이렇게 해야 절감폭은 크지만 실제 실행은 깨지는 추천을 줄일 수 있다.
     """
     if shell_status == "no_shell":
         return recs
@@ -295,13 +308,11 @@ def _filter_recs_by_shell(recs: list[dict], shell_status: str) -> list[dict]:
 
 def _extract_apt_packages(run_text: str) -> Optional[list[str]]:
     """
-    Extract package names from a straightforward apt install command.
+    단순한 apt install 명령에서 패키지 이름만 추출한다.
 
-    Supported shape:
-      apt-get update && apt-get install -y <packages...>
-
-    More complex shell logic deliberately returns None so the caller can avoid
-    unsafe Alpine rewrites.
+    이 helper는 Alpine 변환 가능성 판단용이다. shell 문법이 복잡하면
+    잘못된 변환으로 이어질 수 있으므로, 애매한 경우에는 None을 반환해
+    caller가 Alpine 추천을 포기하도록 만든다.
     """
     normalized = re.sub(r"\s+", " ", run_text.strip())
     match = re.search(r"(?:apt-get|apt)\s+install\s+(.+)", normalized, re.IGNORECASE)
@@ -317,7 +328,12 @@ def _extract_apt_packages(run_text: str) -> Optional[list[str]]:
 
 
 def _can_translate_apt_packages_to_alpine(packages: list[str]) -> bool:
-    """Return True if every package has a confident Alpine equivalent."""
+    """
+    apt 패키지 목록을 Alpine 쪽으로 안전하게 옮길 수 있는지 판단한다.
+
+    모든 패키지가 명시적 매핑이 있거나 그대로 통과 가능한 패키지일 때만 True다.
+    하나라도 애매하면 False를 반환해서 Alpine 추천을 보수적으로 제거한다.
+    """
     for package in packages:
         if package in _APT_TO_APK_PACKAGE_MAP:
             continue
@@ -329,8 +345,13 @@ def _can_translate_apt_packages_to_alpine(packages: list[str]) -> bool:
 
 def _filter_recs_by_pkg_manager(stage: Stage, recs: list[dict]) -> tuple[list[dict], str]:
     """
-    Remove Alpine candidates when the final stage uses apt packages that cannot
-    be translated safely.
+    패키지 매니저 사용 흔적을 보고 추천 후보를 다시 거른다.
+
+    주 목적은 Alpine 추천의 안전성 보강이다. final stage가 apt 패키지에
+    의존하는데 그 패키지를 Alpine로 자신 있게 옮길 수 없으면 Alpine 후보를
+    제거하고 slim 계열 추천으로 후퇴한다.
+
+    반환값의 두 번째 문자열은 왜 후보가 제외됐는지 설명하는 signal이다.
     """
     apt_packages: list[str] = []
     for instr in stage.run_instructions:
@@ -355,21 +376,16 @@ def _filter_recs_by_pkg_manager(stage: Stage, recs: list[dict]) -> tuple[list[di
 
 def _detect_shell_requirement(stage: Stage) -> tuple[str, str]:
     """
-    Inspect the stage's instructions to determine if a shell is needed at runtime.
+    stage instruction을 보고 runtime에 shell이 필요한지 추론한다.
 
-    Detection signals (in priority order):
-      needs_shell:
-        - SHELL directive present
-        - CMD or ENTRYPOINT in shell form (argument does not start with '[')
-        - COPY *.sh  (shell scripts copied into the image)
-      no_shell:
-        - exec-form ENTRYPOINT ["binary", ...] and none of the above signals
-      unknown:
-        - no CMD / ENTRYPOINT found → default to slim (safe choice)
+    distroless/scratch 추천의 안전장치 역할을 하는 helper다.
+    - SHELL directive
+    - shell-form CMD/ENTRYPOINT
+    - `.sh` 스크립트 COPY
+    같은 흔적이 있으면 `needs_shell` 로 본다.
 
-    Returns:
-        (status, signal_description)
-        status: "needs_shell" | "no_shell" | "unknown"
+    반환값은 `(status, signal_description)` 형태이며,
+    왜 그런 판단을 했는지 display에 설명하기 위해 signal 문자열도 함께 준다.
     """
     has_exec_form_entrypoint = False
 
@@ -414,6 +430,19 @@ _ALREADY_OPTIMAL = re.compile(
 
 
 def check(ir: DockerfileIR) -> list[Finding]:
+    """
+    final stage의 base image가 더 가벼운 대안으로 바뀔 수 있는지 검사한다.
+
+    처리 흐름:
+    1. final stage base image를 `_RULES` 패턴과 매칭한다.
+    2. shell requirement를 감지해서 distroless/scratch 후보를 필터링한다.
+    3. apt 사용 흔적을 감지해서 Alpine 후보를 필터링한다.
+    4. 남은 후보 중 saving max가 가장 큰 항목을 대표 추천으로 선택한다.
+    5. 단순 치환이 가능한 경우 Patch도 함께 생성한다.
+
+    즉, 단순히 가장 작은 이미지를 추천하는 것이 아니라,
+    실제 빌드/실행 가능성을 함께 고려한 보수적인 추천 rule이다.
+    """
     # Builder stage가 크더라도 runtime stage가 가볍다면 이 rule의 목적에는
     # 부합하므로, 최종 stage의 base image만 본다.
     final = ir.final_stage
@@ -487,7 +516,12 @@ def check(ir: DockerfileIR) -> list[Finding]:
 
 
 def _find_final_from_line(ir: DockerfileIR) -> Optional[int]:
-    """return 1-based line number of the final stage FROM instruction."""
+    """
+    final stage를 시작하는 FROM instruction의 1-based line number를 찾는다.
+
+    base image 교체 patch는 FROM 줄 하나를 직접 치환하는 방식이라,
+    recommender가 정확한 line number를 알아야 한다.
+    """
     target = len(ir.stages)
     count = 0
     for i, line in enumerate(ir.raw_lines):

@@ -41,11 +41,20 @@ _BUILD_TOOL_PACKAGES: list[str] = [
 
 def check(ir: DockerfileIR) -> list[Finding]:
     """
-    Flag single-stage Python Dockerfiles that should become multi-stage.
+    single-stage Python Dockerfile이 실제로 multi-stage 전환 대상인지 판정한다.
 
-    The rule intentionally avoids non-Python images. Once a recommendation is
-    emitted, recommender.py can turn the recommendation body into the actual
-    optimized Dockerfile content.
+    이 함수는 Python이 아닌 이미지에는 관여하지 않는다. 범위를 좁히는 대신,
+    Python에 대해서는 recommendation 자체를 실제 Dockerfile 본문으로 만들 수
+    있을 정도로 구체적인 판단을 수행한다.
+
+    신호로 보는 것:
+    - build tool 패키지 설치 흔적
+    - apt install 흔적
+    - pip install 흔적
+    - broad COPY
+
+    이런 신호가 없으면 "멀티스테이지는 가능하지만 실익이 약하다"고 보고
+    Finding을 만들지 않는다.
     """
     if ir.is_multi_stage:
         return []
@@ -90,13 +99,16 @@ def check(ir: DockerfileIR) -> list[Finding]:
     ]
 def _build_python_template(ir: DockerfileIR, final: Stage) -> str:
     """
-    Build a concrete Python multi-stage Dockerfile from the current Dockerfile.
+    현재 single-stage Dockerfile을 기반으로 실제 Python multi-stage 본문을 생성한다.
 
-    Design constraints:
-    - preserve the original instruction stream where possible
-    - install Python dependencies into a dedicated venv in the builder
-    - avoid copying the builder's full /usr/local tree into the runtime image
-    - keep runtime output conservative and buildable
+    이 함수는 단순 예시 템플릿을 붙이는 것이 아니라, 파싱된 instruction 목록을
+    읽어서 builder/runtime를 다시 조립한다.
+
+    핵심 원칙:
+    - 가능한 한 원본 instruction 순서를 보존한다.
+    - Python 의존성은 `/opt/venv` 에 격리한다.
+    - runtime stage에는 builder의 전체 `/usr/local` 을 복사하지 않는다.
+    - runtime command는 python_runtime rule의 추론 결과를 반영한다.
     """
     image = final.base_image
     runtime_image = _python_runtime_image(image)
@@ -206,7 +218,12 @@ def _build_inline_python_template(
     runtime_only_lines: list[str],
 ) -> str:
     """
-    Fallback builder when no manifest-aware dependency strategy is available.
+    manifest 파일 전략을 쓸 수 없을 때 사용하는 fallback 경로.
+
+    `requirements.txt` 나 `pyproject.toml` 같은 명확한 dependency 파일이
+    없으면, copy/install 순서를 과도하게 재배열하는 것이 오히려 위험할 수 있다.
+    이 경우에는 원본 instruction 흐름을 최대한 보존하면서 venv 기반의
+    builder/runtime 분리만 적용한다.
     """
     copy_usr_local_bin = False
     recommended_env_lines = recommended_python_env_lines(final)
@@ -258,7 +275,13 @@ def _build_inline_python_template(
 
 
 def _python_runtime_image(image: str) -> str:
-    """Choose a conservative runtime base that stays compatible with apt-based builders."""
+    """
+    generated runtime stage에 사용할 보수적인 Python base image를 고른다.
+
+    현재는 Alpine 같은 공격적인 전환보다 `-slim` 쪽을 우선한다.
+    이유는 builder에서 apt 계열 도구를 쓰는 Python 프로젝트가 많고,
+    무리한 base 교체는 validate 단계에서 바로 깨질 가능성이 높기 때문이다.
+    """
     if image.endswith("-slim") or image.endswith("-alpine"):
         return image
 
@@ -269,7 +292,12 @@ def _python_runtime_image(image: str) -> str:
 
 
 def _last_instruction_args(final: Stage, instruction: str) -> str | None:
-    """Return the arguments of the last matching instruction in the stage."""
+    """
+    stage 안에서 특정 instruction이 마지막으로 등장한 인수를 반환한다.
+
+    예를 들어 WORKDIR은 여러 번 바뀔 수 있으므로, 최종적으로 효력이 있는
+    마지막 WORKDIR 값을 잡기 위해 사용한다.
+    """
     for instr in reversed(final.instructions):
         if instr.instruction == instruction:
             return instr.arguments
@@ -277,7 +305,12 @@ def _last_instruction_args(final: Stage, instruction: str) -> str | None:
 
 
 def _find_first_build_signal_line(final: Stage) -> int | None:
-    """Return the earliest line that shows the stage is doing build-time work."""
+    """
+    '이 stage는 빌드성 작업을 한다'는 가장 이른 line number를 찾는다.
+
+    CLI 출력에서 SINGLE_STAGE_BUILD Finding이 Dockerfile 어디를 가리킬지 정하는
+    용도다. apt install, pip install, build tool 키워드 순으로 검사한다.
+    """
     for instr in final.run_instructions:
         if re.search(r"\b(?:apt-get|apt)\s+install\b", instr.arguments, re.IGNORECASE):
             return instr.line_no
@@ -292,7 +325,14 @@ def _find_first_build_signal_line(final: Stage) -> int | None:
 
 
 def _find_first_dependency_run_index(final: Stage) -> int | None:
-    """Return the instruction index of the first Python dependency install step."""
+    """
+    첫 번째 Python dependency install RUN의 instruction index를 찾는다.
+
+    manifest-first 전략에서는 이 지점을 기준으로
+    - 의존성 설치 전에 둘 instruction
+    - 의존성 설치 후에 둘 instruction
+    을 나눠서 builder를 재구성한다.
+    """
     for idx, instr in enumerate(final.instructions):
         if instr.instruction == "RUN" and _is_dependency_run(instr):
             return idx
@@ -301,11 +341,15 @@ def _find_first_dependency_run_index(final: Stage) -> int | None:
 
 def _detect_python_dependency_strategy(ir: DockerfileIR, final: Stage) -> tuple[str, list[str]]:
     """
-    Detect which dependency-file strategy can be used for a generated builder.
+    builder stage에서 어떤 dependency-layer 전략을 쓸지 결정한다.
 
-    - requirements: requirements*.txt / constraints*.txt present and pip install is used
-    - poetry: pyproject.toml present and poetry install is used
-    - inline: fall back to preserving the original order more directly
+    반환 전략:
+    - `requirements`: requirements/constraints 파일 기반 pip install
+    - `poetry`: pyproject.toml + poetry.lock 기반 install
+    - `inline`: 파일 기반 전략을 안전하게 쓸 수 없을 때의 fallback
+
+    이 분기는 "의존성 파일만 먼저 COPY하고 install한 뒤 앱 전체를 COPY"하는
+    최적화가 가능한지 판단하는 핵심 단계다.
     """
     context_dir = Path(ir.path).parent
     requirement_files = sorted(
@@ -335,7 +379,12 @@ def _detect_python_dependency_strategy(ir: DockerfileIR, final: Stage) -> tuple[
 
 
 def _build_manifest_copy_lines(strategy: str, manifest_files: list[str]) -> list[str]:
-    """Emit explicit dependency-file COPY instructions for manifest-aware builders."""
+    """
+    dependency manifest만 먼저 복사하는 COPY 라인을 생성한다.
+
+    manifest-first 전략의 목적은 앱 소스 코드가 조금 바뀌어도 의존성 layer가
+    불필요하게 다시 빌드되지 않게 만드는 데 있다.
+    """
     if not manifest_files:
         return []
     if strategy not in {"requirements", "poetry"}:
@@ -345,7 +394,11 @@ def _build_manifest_copy_lines(strategy: str, manifest_files: list[str]) -> list
 
 def _build_dependency_run_lines(final: Stage, strategy: str) -> list[str]:
     """
-    Reuse the original dependency install commands, but normalize pip/apt flags.
+    원본 dependency install RUN을 재사용하되 Python 친화적으로 정규화한다.
+
+    예:
+    - pip install -> --no-cache-dir 추가
+    - apt install -> --no-install-recommends 와 cleanup 추가
     """
     lines: list[str] = []
     for instr in final.instructions:
@@ -356,7 +409,11 @@ def _build_dependency_run_lines(final: Stage, strategy: str) -> list[str]:
 
 
 def _is_dependency_run(instr) -> bool:
-    """Return True for Python dependency installation commands."""
+    """
+    주어진 RUN이 Python dependency 설치 단계인지 판정한다.
+
+    현재는 `pip install` 과 `poetry install` 을 dependency install로 본다.
+    """
     if instr.instruction != "RUN":
         return False
     return bool(
@@ -366,7 +423,12 @@ def _is_dependency_run(instr) -> bool:
 
 
 def _is_manifest_copy_instruction(instr) -> bool:
-    """Return True when a COPY/ADD instruction is only moving dependency manifests."""
+    """
+    COPY/ADD instruction이 dependency manifest만 옮기는지 판정한다.
+
+    manifest-first builder를 만들 때는 이런 COPY를 일반 app source COPY와
+    구분해야 하므로 별도 helper로 분리했다.
+    """
     if instr.instruction not in {"COPY", "ADD"}:
         return False
     lowered = instr.arguments.lower()
@@ -382,7 +444,12 @@ def _is_manifest_copy_instruction(instr) -> bool:
 
 
 def _normalize_python_run(run_text: str, run_args: str) -> str:
-    """Apply Python-specific normalization to generated builder RUN instructions."""
+    """
+    generated builder에 들어갈 RUN 문자열에 Python 전용 정규화를 적용한다.
+
+    현재는 apt install과 pip install을 감지해서 각 전용 helper로 넘긴다.
+    다른 RUN은 원문을 그대로 유지한다.
+    """
     if re.search(r"\b(?:apt-get|apt)\s+install\b", run_args, re.IGNORECASE):
         return _normalize_python_apt_run(run_text)
     if re.search(r"\bpip(?:3)?\s+install\b", run_args, re.IGNORECASE):
@@ -392,10 +459,13 @@ def _normalize_python_run(run_text: str, run_args: str) -> str:
 
 def _normalize_python_apt_run(run_text: str) -> str:
     """
-    Add conservative apt optimizations inside the generated builder stage.
+    generated builder 안의 apt install 명령에 보수적인 최적화를 추가한다.
 
-    The goal is not to be clever; it is to avoid carrying recommended packages
-    and apt lists when reconstructing the builder instructions.
+    이 함수는 공격적인 재작성보다 안전한 정규화에 집중한다.
+    - `--no-install-recommends` 추가
+    - apt lists cleanup 추가
+
+    즉, apt 명령의 의미를 크게 바꾸지 않으면서 불필요한 layer 낭비를 줄인다.
     """
     updated = run_text
     if "apt-get install -y" in updated and "--no-install-recommends" not in updated:
@@ -409,10 +479,10 @@ def _normalize_python_apt_run(run_text: str) -> str:
 
 def _normalize_python_pip_run(run_text: str) -> str:
     """
-    Ensure generated pip installs do not leave cache behind.
+    generated builder 안의 pip install에 `--no-cache-dir` 를 보장한다.
 
-    The venv path is already injected at the stage level via PATH, so the
-    original install command can stay otherwise unchanged.
+    venv 경로는 stage 수준에서 이미 PATH에 주입해 두었으므로,
+    여기서는 install 대상이나 패키지 목록은 건드리지 않고 pip cache만 막는다.
     """
     updated = run_text
     if "pip install" in updated and "--no-cache-dir" not in updated:
