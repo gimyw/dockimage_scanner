@@ -1,293 +1,292 @@
 # Python 이미지 최적화 성능/운영 테스트 가이드
 
-이 문서는 `imgadvisor`로 생성한 최적화 Dockerfile이 실제로 어떤 이점을 주는지 검증하기 위한 실험 절차를 정리한 문서입니다.
+`imgadvisor`로 생성한 최적화 Dockerfile이 실제로 어떤 이점을 주는지 검증하기 위한 실험 절차입니다.
 
-핵심은 단순 HTTP 처리 성능만 보는 것이 아니라, 실제 운영에서 체감되는 아래 지표를 함께 비교하는 것입니다.
+단순 HTTP 처리 성능만 보는 것이 아니라, 실제 운영에서 체감되는 아래 지표를 함께 비교합니다.
 
 - 이미지 크기
 - 빌드 시간
-- Docker Hub push 시간
-- Docker Hub pull 시간
+- Docker Hub push/pull 시간
 - 컨테이너 시작 후 첫 응답 시간
 - 런타임 부하테스트 결과
 
-## 왜 이런 지표를 봐야 하는가
-
-이미지 경량화의 1차 효과는 보통 CPU 처리량보다 아래 영역에서 먼저 드러납니다.
-
-- CI 빌드 시간 단축
-- 레지스트리 업로드/다운로드 시간 단축
-- 배포 시 pull 시간 단축
-- 컨테이너 cold start 시간 단축
-- 런타임 메모리 사용량 감소
-
-즉, `wrk`나 `hey` 같은 요청 부하테스트만으로는 이미지 경량화의 장점을 충분히 설명하기 어렵습니다.
-
 ## 테스트 대상
 
-이 저장소에는 아래 세 개의 테스트 Dockerfile이 있습니다.
+| 케이스 | 원본 | 최적화 | 앱 | 포트 | readiness endpoint |
+|---|---|---|---|---|---|
+| pre1 | `Dockerfile.pre1` | `Dockerfile.pre1.optimized` | Flask (gunicorn) | 5000 | `/ready` |
+| pre2 | `Dockerfile.pre2` | `Dockerfile.pre2.optimized` | FastAPI (uvicorn) | 8000 | `/ready` |
+| pre3 | `Dockerfile.pre3` | `Dockerfile.pre3.optimized` | Flask (gunicorn) | 5000 | `/ready` |
 
-- `test/Dockerfile.pre1`
-- `test/Dockerfile.pre2`
-- `test/Dockerfile.pre3`
+빌드 컨텍스트는 `test/` 디렉터리입니다.
 
-각 원본 Dockerfile의 최적화 결과도 함께 저장되어 있습니다.
+## 사전 준비
 
-- `test/Dockerfile.pre1.optimized`
-- `test/Dockerfile.pre2.optimized`
-- `test/Dockerfile.pre3.optimized`
-
-## 공통 사전 준비
-
-Docker Hub에 push 테스트까지 할 계획이면 먼저 로그인합니다.
+Docker Hub에 push할 경우 먼저 로그인합니다.
 
 ```bash
 docker login -u 0206pdh
 ```
 
-`imgadvisor`가 설치되어 있어야 합니다. 최신 release 설치는 아래 문서를 따릅니다.
-
-- `README.md`
-
-## 1. 이미지 크기 비교
-
-가장 기본이 되는 지표입니다.
+`imgadvisor` 설치 확인:
 
 ```bash
-docker build -f test/Dockerfile.pre1 -t pre1-original test
-docker build -f test/Dockerfile.pre1.optimized -t pre1-optimized test
-
-docker image inspect pre1-original --format '{{.Size}}'
-docker image inspect pre1-optimized --format '{{.Size}}'
+imgadvisor --help
 ```
 
-같은 방식으로 `pre2`, `pre3`도 비교합니다.
+## 1. 이미지 빌드
 
-기록 추천 항목:
+```bash
+# pre1
+docker build -f test/Dockerfile.pre1            -t pre1-original  test
+docker build -f test/Dockerfile.pre1.optimized  -t pre1-optimized test
 
-- 원본 이미지 크기
-- 최적화 이미지 크기
-- 절감량
-- 절감률
+# pre2
+docker build -f test/Dockerfile.pre2            -t pre2-original  test
+docker build -f test/Dockerfile.pre2.optimized  -t pre2-optimized test
 
-## 2. 빌드 시간 비교
+# pre3
+docker build -f test/Dockerfile.pre3            -t pre3-original  test
+docker build -f test/Dockerfile.pre3.optimized  -t pre3-optimized test
+```
 
-최초 cold build와, 캐시가 있는 상태의 재빌드를 분리해서 보는 것이 좋습니다.
+## 2. 이미지 크기 비교
 
-### cold build
+```bash
+docker images --format "table {{.Repository}}\t{{.Tag}}\t{{.Size}}" \
+  | grep -E "pre[123]-(original|optimized)"
+```
+
+더 정확한 바이트 단위 크기:
+
+```bash
+for img in pre1-original pre1-optimized pre2-original pre2-optimized pre3-original pre3-optimized; do
+  size=$(docker image inspect "$img" --format '{{.Size}}')
+  echo "$img: $size bytes"
+done
+```
+
+## 3. 빌드 시간 비교
+
+### cold build (캐시 없이)
 
 ```bash
 docker builder prune -af
-/usr/bin/time -f "elapsed=%E" docker build --no-cache -f test/Dockerfile.pre1 -t pre1-original test
-/usr/bin/time -f "elapsed=%E" docker build --no-cache -f test/Dockerfile.pre1.optimized -t pre1-optimized test
+
+time docker build --no-cache -f test/Dockerfile.pre1           -t pre1-original  test
+time docker build --no-cache -f test/Dockerfile.pre1.optimized -t pre1-optimized test
+
+time docker build --no-cache -f test/Dockerfile.pre2           -t pre2-original  test
+time docker build --no-cache -f test/Dockerfile.pre2.optimized -t pre2-optimized test
+
+time docker build --no-cache -f test/Dockerfile.pre3           -t pre3-original  test
+time docker build --no-cache -f test/Dockerfile.pre3.optimized -t pre3-optimized test
 ```
 
-### warm build
+### warm build (캐시 활용)
 
 ```bash
-/usr/bin/time -f "elapsed=%E" docker build -f test/Dockerfile.pre1 -t pre1-original test
-/usr/bin/time -f "elapsed=%E" docker build -f test/Dockerfile.pre1.optimized -t pre1-optimized test
+time docker build -f test/Dockerfile.pre1           -t pre1-original  test
+time docker build -f test/Dockerfile.pre1.optimized -t pre1-optimized test
 ```
 
-manifest-first 전략 효과를 보려면 `requirements.txt`만 바꾼 경우와 앱 코드만 바꾼 경우를 나눠서 재빌드하는 것도 좋습니다.
+## 4. Docker Hub push
 
-## 3. Docker Hub push 시간 비교
-
-실무적으로 가장 설득력 있는 지표 중 하나입니다.
+태그 추가 후 push합니다.
 
 ```bash
-docker build -f test/Dockerfile.pre1 -t 0206pdh/imgadvisor-test:pre1-original test
-docker build -f test/Dockerfile.pre1.optimized -t 0206pdh/imgadvisor-test:pre1-optimized test
+# pre1
+docker tag pre1-original  0206pdh/imgadvisor-test:pre1-original
+docker tag pre1-optimized 0206pdh/imgadvisor-test:pre1-optimized
 
-/usr/bin/time -f "elapsed=%E" docker push 0206pdh/imgadvisor-test:pre1-original
-/usr/bin/time -f "elapsed=%E" docker push 0206pdh/imgadvisor-test:pre1-optimized
+# pre2
+docker tag pre2-original  0206pdh/imgadvisor-test:pre2-original
+docker tag pre2-optimized 0206pdh/imgadvisor-test:pre2-optimized
+
+# pre3
+docker tag pre3-original  0206pdh/imgadvisor-test:pre3-original
+docker tag pre3-optimized 0206pdh/imgadvisor-test:pre3-optimized
 ```
 
-권장:
+push 시간 측정:
 
-- 태그는 `pre1-original-v1`, `pre1-optimized-v1`처럼 실험 번호를 붙여 관리
-- 같은 네트워크 상태에서 2~3회 반복 측정
+```bash
+time docker push 0206pdh/imgadvisor-test:pre1-original
+time docker push 0206pdh/imgadvisor-test:pre1-optimized
 
-## 4. Docker Hub pull 시간 비교
+time docker push 0206pdh/imgadvisor-test:pre2-original
+time docker push 0206pdh/imgadvisor-test:pre2-optimized
 
-배포 환경에서 체감되는 지표입니다.
+time docker push 0206pdh/imgadvisor-test:pre3-original
+time docker push 0206pdh/imgadvisor-test:pre3-optimized
+```
+
+## 5. Docker Hub pull 시간
 
 ```bash
 docker rmi 0206pdh/imgadvisor-test:pre1-original
-/usr/bin/time -f "elapsed=%E" docker pull 0206pdh/imgadvisor-test:pre1-original
+time docker pull 0206pdh/imgadvisor-test:pre1-original
 
 docker rmi 0206pdh/imgadvisor-test:pre1-optimized
-/usr/bin/time -f "elapsed=%E" docker pull 0206pdh/imgadvisor-test:pre1-optimized
+time docker pull 0206pdh/imgadvisor-test:pre1-optimized
+
+docker rmi 0206pdh/imgadvisor-test:pre2-original
+time docker pull 0206pdh/imgadvisor-test:pre2-original
+
+docker rmi 0206pdh/imgadvisor-test:pre2-optimized
+time docker pull 0206pdh/imgadvisor-test:pre2-optimized
+
+docker rmi 0206pdh/imgadvisor-test:pre3-original
+time docker pull 0206pdh/imgadvisor-test:pre3-original
+
+docker rmi 0206pdh/imgadvisor-test:pre3-optimized
+time docker pull 0206pdh/imgadvisor-test:pre3-optimized
 ```
 
-주의:
+## 6. 컨테이너 시작 후 첫 응답 시간
 
-- 로컬 캐시를 완전히 통제하려면 새 VM 또는 새 Docker host가 더 정확합니다.
-- `docker rmi`만으로도 실험은 가능하지만 완전한 무캐시 상태를 보장하지는 않습니다.
+`docker run` 직후부터 `/ready` 응답까지 걸리는 시간입니다.
 
-## 5. 컨테이너 시작 후 첫 응답 시간
+### 포트 정보
 
-이미지 경량화와 runtime 정리의 효과를 보기 좋은 지표입니다.
+| 케이스 | 포트 |
+|---|---|
+| pre1 | 5000 |
+| pre2 | 8000 |
+| pre3 | 5000 |
 
-이 지표는 보통 아래 시간을 뜻합니다.
+### 측정 스크립트
 
-- 시작 시점: `docker run` 명령을 실행한 직후
-- 종료 시점: 애플리케이션이 외부 요청에 처음으로 정상 응답(`200 OK`)을 반환한 시점
-
-즉 단순히 "프로세스가 떴다"가 아니라, 실제로 트래픽을 받을 준비가 끝났는지를 보는 지표입니다.
-
-이 값에는 아래 과정이 함께 포함됩니다.
-
-- 컨테이너 프로세스 시작
-- Python 인터프리터 로딩
-- 패키지 import
-- 앱 초기화
-- 웹 서버 바인딩
-- 첫 HTTP 요청 처리 가능 상태 도달
-
-운영 관점에서는 이 지표가 아래에 직접 연결됩니다.
-
-- 배포 시 새 컨테이너 readiness 도달 시간
-- 오토스케일 시 신규 인스턴스 준비 시간
-- 장애 후 재시작 회복 시간
-- Kubernetes readiness probe 통과 시점
-
-그래서 이 값은 단순 성능 수치라기보다 "얼마나 빨리 서비스 가능한 상태가 되느냐"를 보는 지표라고 이해하는 것이 맞습니다.
-
-예시:
+아래 함수를 사용하면 케이스별로 간편하게 측정할 수 있습니다.
 
 ```bash
-docker run --rm -d --name pre1-orig -p 5000:5000 pre1-original
-curl http://127.0.0.1:5000/
-docker rm -f pre1-orig
+measure_ready() {
+  local name=$1
+  local image=$2
+  local port=$3
 
+  docker rm -f "$name" 2>/dev/null
+
+  start=$(date +%s%N)
+  docker run --rm -d --name "$name" -p "${port}:${port}" "$image" > /dev/null
+
+  until curl -fsS "http://127.0.0.1:${port}/ready" > /dev/null 2>&1; do
+    sleep 0.05
+  done
+
+  end=$(date +%s%N)
+  ms=$(( (end - start) / 1000000 ))
+  echo "${image}: ${ms}ms"
+
+  docker rm -f "$name" > /dev/null 2>&1
+}
+
+# pre1 (port 5000)
+measure_ready pre1-orig pre1-original  5000
+measure_ready pre1-opt  pre1-optimized 5000
+
+# pre2 (port 8000)
+measure_ready pre2-orig pre2-original  8000
+measure_ready pre2-opt  pre2-optimized 8000
+
+# pre3 (port 5000)
+measure_ready pre3-orig pre3-original  5000
+measure_ready pre3-opt  pre3-optimized 5000
+```
+
+3~5회 반복해서 평균과 편차를 함께 기록하는 편이 좋습니다.
+
+## 7. HTTP 부하테스트
+
+경량화 후에도 성능이 유지되는지 검증합니다.
+
+```bash
+# pre1 (port 5000)
 docker run --rm -d --name pre1-opt -p 5000:5000 pre1-optimized
-curl http://127.0.0.1:5000/
-docker rm -f pre1-opt
-```
-
-더 엄밀히 하려면 `docker run` 직후부터 첫 200 응답까지 시간을 스크립트로 측정합니다.
-
-예를 들어 bash 기준으로는 아래처럼 측정할 수 있습니다.
-
-```bash
-start=$(date +%s.%N)
-docker run --rm -d --name pre1-opt -p 5000:5000 pre1-optimized > /dev/null
-
-until curl -fsS http://127.0.0.1:5000/ready > /dev/null; do
-  sleep 0.1
-done
-
-end=$(date +%s.%N)
-echo "$end - $start" | bc
-
-docker rm -f pre1-opt
-```
-
-가능하면 `/` 보다는 `/ready` 같은 readiness endpoint를 사용하는 편이 더 좋습니다.
-
-이유:
-
-- `/`는 템플릿 렌더링, DB 호출, 부가 로직이 섞일 수 있음
-- `/ready`는 "앱이 기동 완료되었는가"만 더 순수하게 보기 좋음
-
-비교 포인트:
-
-- 실행 가능 여부
-- 첫 성공 응답까지 시간
-- 시작 실패 여부
-
-해석 시 주의할 점:
-
-- `pre1`처럼 `flask run`에서 `gunicorn`으로 엔트리포인트가 바뀌는 경우
-  - 순수 이미지 경량화 효과
-  - 서버 변경 효과
-  가 함께 섞여 나타납니다.
-- 따라서 이 케이스는 "이미지 최적화 + 런타임 엔트리포인트 개선"이 같이 반영된 결과로 해석하는 것이 맞습니다.
-- 한 번만 측정하지 말고 최소 3~5회 반복해서 평균과 편차를 함께 기록하는 편이 좋습니다.
-
-## 6. 실제 HTTP 부하테스트
-
-이 단계는 "경량화 후에도 성능이 유지되는가"를 검증하는 용도로 쓰는 것이 좋습니다.
-
-권장 도구:
-
-- `hey`
-- `wrk`
-- `ab`
-
-예시:
-
-```bash
 hey -n 10000 -c 100 http://127.0.0.1:5000/
+docker rm -f pre1-opt
+
+# pre2 (port 8000)
+docker run --rm -d --name pre2-opt -p 8000:8000 pre2-optimized
+hey -n 10000 -c 100 http://127.0.0.1:8000/
+docker rm -f pre2-opt
+
+# pre3 (port 5000)
+docker run --rm -d --name pre3-opt -p 5000:5000 pre3-optimized
+hey -n 10000 -c 100 http://127.0.0.1:5000/
+docker rm -f pre3-opt
 ```
 
-또는:
+`hey` 대신 `wrk`를 사용하는 경우:
 
 ```bash
 wrk -t4 -c100 -d30s http://127.0.0.1:5000/
 ```
 
-기록 항목:
+기록 항목: RPS, 평균 latency, p95, p99, 에러율
 
-- RPS
-- 평균 latency
-- p95 latency
-- p99 latency
-- 에러율
-
-## 7. 메모리/CPU 사용량 비교
-
-이미지 경량화는 런타임 메모리에도 영향을 줄 수 있습니다.
+## 8. 메모리/CPU 사용량 비교
 
 ```bash
-docker stats --no-stream pre1-orig
-docker stats --no-stream pre1-opt
+docker run --rm -d --name pre1-orig -p 5000:5000 pre1-original
+docker run --rm -d --name pre1-opt  -p 5001:5000 pre1-optimized
+
+# 부하 주입 후 측정
+hey -n 5000 -c 50 http://127.0.0.1:5000/ &
+hey -n 5000 -c 50 http://127.0.0.1:5001/ &
+wait
+
+docker stats --no-stream pre1-orig pre1-opt
+
+docker rm -f pre1-orig pre1-opt
 ```
 
-또는 컨테이너를 띄운 뒤 일정 부하를 준 상태에서:
+## 9. imgadvisor로 분석
 
-- CPU 사용률
-- 메모리 사용량
-- 네트워크 I/O
+빌드 전 분석은 아래처럼 실행합니다.
 
-를 함께 기록합니다.
+```bash
+# 정적 분석
+imgadvisor analyze -f test/Dockerfile.pre1
+imgadvisor analyze -f test/Dockerfile.pre2
+imgadvisor analyze -f test/Dockerfile.pre3
 
-## 테스트 설계 시 주의점
+# 최적화 Dockerfile 생성 (imgadvisor가 직접 생성한 것과 수동 작성본 비교)
+imgadvisor recommend -f test/Dockerfile.pre1 -o /tmp/pre1-reco.Dockerfile
+imgadvisor recommend -f test/Dockerfile.pre2 -o /tmp/pre2-reco.Dockerfile
+imgadvisor recommend -f test/Dockerfile.pre3 -o /tmp/pre3-reco.Dockerfile
 
-### 엔트리포인트가 바뀐 경우
+# 실제 빌드 비교 (Docker 데몬 필요)
+imgadvisor validate -f test/Dockerfile.pre1 --optimized test/Dockerfile.pre1.optimized
+imgadvisor validate -f test/Dockerfile.pre2 --optimized test/Dockerfile.pre2.optimized
+imgadvisor validate -f test/Dockerfile.pre3 --optimized test/Dockerfile.pre3.optimized
 
-`pre1`처럼 `flask run`이 `gunicorn`으로 바뀌면, 순수 이미지 경량화 효과와 서버 교체 효과가 같이 나타납니다.
-
-이 경우 결과 해석을 두 단계로 나누는 것이 좋습니다.
-
-- 이미지/배포 효율 개선
-- 런타임 서버 개선
-
-즉 `pre1`은 "이미지 경량화 + 엔트리포인트 개선"이 함께 반영된 케이스로 보는 것이 맞습니다.
-
-### `pre2`와 `pre3`의 의미
-
-- `pre2`: Uvicorn 엔트리포인트를 유지한 채 구조와 이미지 크기를 줄이는 케이스
-- `pre3`: `requirements.txt` 기반 dependency layer 전략이 얼마나 유지되는지 보는 케이스
+# 레이어 분석
+imgadvisor layers -f test/Dockerfile.pre1
+imgadvisor layers -f test/Dockerfile.pre1.optimized
+```
 
 ## 권장 비교 표
 
-아래 항목을 표로 정리하면 발표나 문서화에 가장 적합합니다.
-
 | 케이스 | 원본 크기 | 최적화 크기 | 빌드 시간 | push 시간 | pull 시간 | 첫 응답 시간 | p95 latency | 메모리 |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|
-| pre1 |  |  |  |  |  |  |  |  |
-| pre2 |  |  |  |  |  |  |  |  |
-| pre3 |  |  |  |  |  |  |  |  |
+| pre1 original |  |  |  |  |  |  |  |  |
+| pre1 optimized |  |  |  |  |  |  |  |  |
+| pre2 original |  |  |  |  |  |  |  |  |
+| pre2 optimized |  |  |  |  |  |  |  |  |
+| pre3 original |  |  |  |  |  |  |  |  |
+| pre3 optimized |  |  |  |  |  |  |  |  |
 
-## 추천 결론 방식
+## 케이스별 주요 포인트
 
-결과를 설명할 때는 아래 순서가 가장 자연스럽습니다.
+### pre1
+- `flask run` (dev server) → `gunicorn` (prod server) 변경 효과
+- 이미지 경량화 + 런타임 서버 개선이 함께 반영됨
 
-1. 이미지 크기가 얼마나 줄었는가
-2. 빌드/배포 시간이 얼마나 줄었는가
-3. 실행과 부하테스트에서 회귀가 없는가
-4. 엔트리포인트 변경이 있는 경우, 그것이 성능에 어떤 영향을 주었는가
+### pre2
+- `uvicorn` 엔트리포인트 유지, 단일 스테이지 → 멀티 스테이지
+- 빌드 도구(gcc, make, libffi-dev) + 캐시 미정리 제거 효과
 
-이렇게 정리하면 단순 "가벼워졌다"가 아니라 실제 운영상 이점을 더 설득력 있게 보여줄 수 있습니다.
+### pre3
+- `requirements.txt` 기반 dependency layer 전략 검증
+- builder에서 libpq-dev/git/wget 등 불필요 패키지 제거 + slim 전환 효과
