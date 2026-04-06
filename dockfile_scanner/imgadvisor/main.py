@@ -1,11 +1,11 @@
 """
 imgadvisor CLI 진입점.
 
-Typer를 사용해 세 가지 서브커맨드를 제공한다:
+Typer를 사용해 네 가지 서브커맨드를 제공한다:
   analyze  : Dockerfile 정적 분석 (이미지 비대 요인 탐지)
   recommend: 최적화 Dockerfile 초안 생성
   validate : 원본 vs 최적화 이미지 실제 빌드 비교 (Docker 데몬 필요)
-  scan     : Trivy pre-build 취약점 및 설정 문제 스캔
+  layers   : 레이어별 크기 분석 (docker history 기반)
 """
 from __future__ import annotations
 
@@ -14,7 +14,7 @@ from typing import Optional
 
 import typer
 
-from imgadvisor import display, layer_analyzer, recommender, trivy_scanner, validator
+from imgadvisor import display, layer_analyzer, recommender, validator
 from imgadvisor.analyzer import analyze
 from imgadvisor.parser import parse
 
@@ -154,67 +154,6 @@ def cmd_validate(
 
     display.print_validation(result)
 
-
-@app.command(name="scan")
-def cmd_scan(
-    dockerfile: Path = typer.Option(
-        ..., "--dockerfile", "-f",
-        help="Path to the Dockerfile to scan",
-        exists=True, readable=True,
-    ),
-    severity: str = typer.Option(
-        "MEDIUM,HIGH,CRITICAL", "--severity",
-        help="Trivy severity filter. Example: LOW,MEDIUM,HIGH,CRITICAL",
-    ),
-    ignore_unfixed: bool = typer.Option(
-        False, "--ignore-unfixed",
-        help="Exclude vulnerabilities with no available fix",
-    ),
-    timeout: int = typer.Option(
-        300, "--timeout",
-        help="Trivy command timeout in seconds",
-        min=30,
-    ),
-    json_out: bool = typer.Option(
-        False, "--json",
-        help="Output results as JSON",
-    ),
-) -> None:
-    """
-    Run Trivy pre-build checks for Dockerfile config and build-context dependencies.
-
-    Does NOT build an image. Combines two Trivy scans:
-    - `trivy config`: Dockerfile misconfiguration detection
-    - `trivy fs`: dependency vulnerability detection from lockfiles in the build context
-
-    Requires Trivy to be installed (https://aquasecurity.github.io/trivy).
-    Exits with code 1 if any findings are detected.
-
-    \b
-    Examples:
-        imgadvisor scan -f Dockerfile
-        imgadvisor scan -f Dockerfile --severity HIGH,CRITICAL
-        imgadvisor scan -f Dockerfile --ignore-unfixed --json
-    """
-    try:
-        result = trivy_scanner.scan(
-            dockerfile_path=str(dockerfile),
-            severity=severity,
-            ignore_unfixed=ignore_unfixed,
-            timeout_seconds=timeout,
-        )
-    except RuntimeError as exc:
-        typer.echo(f"[ERROR] {exc}", err=True)
-        raise typer.Exit(code=1)
-
-    if json_out:
-        display.print_trivy_json_result(result)
-    else:
-        display.print_trivy_scan(result)
-
-    # Finding이 있으면 exit code 1 (CI에서 빌드 차단 가능)
-    if result.total_findings:
-        raise typer.Exit(code=1)
 
 
 @app.command(name="layers")

@@ -49,7 +49,6 @@ python -m pip install --no-cache-dir --force-reinstall \
 
 - Python 3.11 이상
 - `validate`, `layers` 사용 시 Docker daemon
-- `scan` 사용 시 Trivy
 
 ## 명령
 
@@ -59,7 +58,6 @@ python -m pip install --no-cache-dir --force-reinstall \
 | `recommend` | 아니오 | 최적화 Dockerfile 생성 |
 | `layers` | 예 | 실제 빌드 후 레이어 크기 분석 |
 | `validate` | 예 | 원본과 최적화본을 실제로 빌드해 비교 |
-| `scan` | 아니오 | Trivy 기반 pre-build 설정/취약점 검사 |
 
 ## 현재 최적화 범위
 
@@ -103,12 +101,6 @@ imgadvisor validate -f Dockerfile --optimized optimized.Dockerfile
 
 ```bash
 imgadvisor layers -f Dockerfile
-```
-
-Trivy pre-build 검사까지 하고 싶다면:
-
-```bash
-imgadvisor scan -f Dockerfile
 ```
 
 ## 최적화 흐름
@@ -316,19 +308,6 @@ CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
 - 현재 구현은 `uvicorn`에 worker 수를 자동으로 넣지 않습니다.
 - 위 예시는 구조 설명용이며, 실제 생성 결과는 프로젝트 의존성과 엔트리포인트 추론 결과에 따라 달라집니다.
 
-## Trivy pre-build 검사
-
-`scan` 명령은 아래 두 검사를 묶어서 실행합니다.
-
-- `trivy config`: Dockerfile 설정 문제 검사
-- `trivy fs`: build context 의존성 취약점 검사
-
-예시:
-
-```bash
-imgadvisor scan -f Dockerfile --ignore-unfixed
-```
-
 ## 프로젝트 구조
 
 ```text
@@ -344,7 +323,6 @@ dockfile_scanner/
 │  ├─ recommender.py
 │  ├─ validator.py
 │  ├─ layer_analyzer.py
-│  ├─ trivy_scanner.py
 │  ├─ display.py
 │  ├─ models.py
 │  └─ rules/
