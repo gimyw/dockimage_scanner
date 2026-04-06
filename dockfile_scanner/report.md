@@ -29,7 +29,7 @@
 | `BASE_IMAGE_NOT_OPTIMIZED` | slim/alpine/distroless 미사용 | HIGH |
 | `BUILD_TOOLS_IN_FINAL_STAGE` | 빌드 도구가 런타임 이미지에 잔존 | HIGH |
 | `APT_CACHE_NOT_CLEANED` | apt 캐시 미정리 | MEDIUM |
-| `PIP_CACHE_NOT_DISABLED` | pip 캐시 미비활성화 | MEDIUM |
+| `PIP_CACHE_NOT_DISABLED` | pip 캐시 비활성화 미적용 | MEDIUM |
 | `BROAD_COPY_SCOPE` | `.dockerignore` 없이 `COPY . .` 사용 | MEDIUM |
 | `SINGLE_STAGE_BUILD` | 빌드 도구 포함 단일 스테이지 | HIGH |
 | `PYTHON_RUNTIME_ENVS_MISSING` | Python 런타임 환경 변수 누락 | MEDIUM |
@@ -149,29 +149,60 @@ CMD ["gunicorn", "-b", "0.0.0.0:5000", "app:app"]
 
 ---
 
-## 4. 측정 결과 요약
+## 4. 측정 결과
 
+`verify_full_lifecycle.sh` 스크립트를 사용해 Cold Start 환경에서 측정한 결과입니다.
 전체 측정 결과는 [result.md](./result.md)를 참고합니다.
 
-### Docker Hub Pull 시간 (Cold Start 실측)
-
-Cold Start 환경(`docker rmi -f` 후 pull)에서 측정한 이미지 다운로드 시간입니다.
+### Docker Hub Pull & Extract 시간
 
 | 케이스 | 원본 | 최적화 | 단축률 |
 |---|---:|---:|---:|
-| pre3 | 71,105ms | 13,239ms | **81.4%** |
+| pre1 | 132,764ms | 29,924ms | **77.5%** |
+| pre2 | 103,930ms | 13,338ms | **87.2%** |
+| pre3 | 12,417ms | 6,518ms | **47.5%** |
 
-pre3 기준, `python:3.11` 풀 이미지(13개 레이어) 대비 `python:3.11-slim` 기반 multi-stage(8개 레이어)로 전환 시 Docker Hub에서 이미지를 내려받는 시간이 약 5.4배 단축되었습니다.
+### 컨테이너 Ready Time
 
-이 수치는 단순 성능 수치를 넘어 아래 운영 시나리오에 직결됩니다.
+| 케이스 | 원본 | 최적화 |
+|---|---:|---:|
+| pre1 | 1,232ms | 1,674ms |
+| pre2 | 1,806ms | 1,920ms |
+| pre3 | 687ms | 1,535ms |
 
-- **배포 속도**: 새 버전 배포 시 이미지 pull 시간 단축
-- **오토스케일**: 트래픽 급증 시 신규 인스턴스 준비 시간 단축
-- **DR(재해 복구)**: 장애 후 Cold Start로 서비스 복구까지 걸리는 시간 단축
+모든 케이스에서 Ready Time은 원본/최적화 모두 2초 이내로, 이미지 경량화가 앱 기동 속도 자체에는 영향을 주지 않음을 확인했습니다.
+
+### Total Time to Ready (Pull + Ready)
+
+| 케이스 | 원본 | 최적화 | 단축량 | 단축률 |
+|---|---:|---:|---:|---:|
+| pre1 | 133,996ms | 31,598ms | 102,398ms | **76.4%** |
+| pre2 | 105,736ms | 15,258ms | 90,478ms | **85.6%** |
+| pre3 | 13,104ms | 8,053ms | 5,051ms | **38.5%** |
 
 ---
 
-## 5. 설계 원칙
+## 5. 결과 해석
+
+### pre2가 가장 큰 절감 효과
+
+`python:3.11` 풀 이미지 + `gcc`, `make`, `libffi-dev` + `fastapi`, `uvicorn`, `sqlalchemy` 조합이 원본 Pull 시간을 103초까지 끌어올린 주된 원인입니다. multi-stage + slim 전환 후 13초로 **87% 단축**되었습니다.
+
+### pre1은 이미지 크기 + 서버 교체 효과 혼재
+
+pre1은 `flask run`(개발 서버)에서 `gunicorn`(운영 서버)으로 엔트리포인트가 함께 교체됩니다. 이미지 경량화 효과와 서버 교체 효과가 함께 반영된 결과로, Pull 시간 77% 단축이 이를 뒷받침합니다.
+
+### pre3는 원본 자체가 상대적으로 가벼움
+
+`flask`, `gunicorn`, `requests`만 포함한 pre3 원본은 `pandas`나 `sqlalchemy` 같은 대형 패키지가 없어 시작부터 pull 시간이 12초 수준입니다. 최적화 후 8초로 38% 단축됩니다.
+
+### Ready Time의 소폭 증가
+
+최적화 이미지의 Ready Time이 원본보다 소폭 길게 나타나는 경향이 있습니다. slim 이미지 + venv 기반 기동 과정에서 발생하는 경미한 오버헤드로 추정되며, 절대값은 2초 미만으로 실운영 영향 수준은 아닙니다.
+
+---
+
+## 6. 설계 원칙
 
 ### 보수적 자동화
 
@@ -181,23 +212,21 @@ pre3 기준, `python:3.11` 풀 이미지(13개 레이어) 대비 `python:3.11-sl
 - **보수적 수정**: 엔트리포인트 변경 (gunicorn 설치 확인 후에만 교체)
 - **수정 안 함**: worker 수, 포트, 운영 환경 의존적 설정
 
-운영 환경을 모르는 상태에서 CPU/메모리 기반의 worker 수나 타임아웃 같은 값을 자동으로 고정하면 오히려 장애를 유발할 수 있기 때문입니다.
+운영 환경을 모르는 상태에서 CPU/메모리 기반의 worker 수나 타임아웃 같은 값을 자동으로 고정하면 오히려 장애를 유발할 수 있습니다.
 
 ### 예측값 미표시
 
-이미지 최적화로 절감되는 용량과 시간은 이미지를 직접 빌드하기 전까지 정확히 알 수 없습니다. `imgadvisor`는 예측 기반 절감량을 출력하지 않으며, 실측값은 `validate` 명령으로 직접 확인하도록 설계되어 있습니다.
+이미지 경량화로 절감되는 용량과 시간은 빌드 전까지 정확히 알 수 없습니다. `imgadvisor`는 예측 절감량을 출력하지 않으며, 실측값은 `validate` 명령으로 직접 확인하도록 설계되어 있습니다.
 
 ---
 
-## 6. 결론
+## 7. 결론
 
 `imgadvisor`의 핵심 가치는 빌드 전 단계에서 이미지 비대 요인을 탐지하고 실행 가능한 최적화 결과물을 즉시 생성하는 것입니다.
 
-테스트 결과를 통해 확인된 주요 효과:
+Cold Start 기반 DR 시나리오 실측을 통해 확인된 주요 효과:
 
-1. **이미지 경량화**: `python:3.11` → `python:3.11-slim` + multi-stage 전환으로 이미지 크기가 대폭 감소
-2. **배포/복구 시간 단축**: Cold Start 기준 Docker Hub pull 시간이 최대 81% 단축 (pre3 실측)
-3. **런타임 안정성 향상**: 개발 서버 제거, 캐시 정리, Python 기본 ENV 보강으로 운영 환경에 적합한 구조로 전환
-4. **CI 파이프라인 연동 가능**: `analyze` 명령이 finding 발견 시 exit code 1을 반환하여 빌드 차단 가능
-
-전체 벤치마크 수치는 [result.md](./result.md)에서 확인할 수 있습니다.
+1. **배포/복구 시간 대폭 단축**: Total Time to Ready 기준 pre1 76%, pre2 86%, pre3 38% 단축
+2. **이미지가 무거울수록 효과 극대화**: pandas, sqlalchemy 등 대형 패키지를 포함한 풀 이미지 기반 케이스에서 절감 효과가 가장 큼
+3. **앱 기동 시간에는 영향 없음**: Ready Time은 원본/최적화 모두 2초 이내로 동일 수준 유지
+4. **CI 파이프라인 연동 가능**: `analyze` 명령이 finding 발견 시 exit code 1을 반환하여 빌드 전 자동 차단 가능
