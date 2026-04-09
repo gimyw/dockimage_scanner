@@ -37,3 +37,8 @@ tests/fixtures/Dockerfile.*_optimized
 # local notes / backups
 README.md.bak
 STUDY.md
+
+# script output — measurement results (may contain internal image names)
+scripts/dr_lifecycle_results.csv
+scripts/node_contention_results.csv
+*.csv
