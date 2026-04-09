@@ -340,3 +340,66 @@ dockfile_scanner/
 ## 현재 범위 정리
 
 이 프로젝트는 넓은 언어 지원보다 Python 최적화 깊이를 우선합니다. 다른 언어도 일부 범용 rule로 분석은 하지만, 실제 Dockerfile 본문을 재구성하는 multi-stage 생성 경로는 현재 Python 전용입니다.
+
+
+---
+
+## 검증 스크립트
+
+### `verify_full_lifecycle.sh` — Cold Start DR 검증
+
+Docker 이미지를 캐시 없이 처음부터 pull해서 서비스가 정상 응답할 때까지의 전체 시간을 측정합니다. 긴급 복구(DR) 시나리오에서 RTO(Recovery Time Objective) 달성 여부를 검증하는 용도입니다.
+
+```bash
+./verify_full_lifecycle.sh <이미지명> [포트] [헬스체크_경로]
+
+# 예시
+./verify_full_lifecycle.sh myrepo/myapp:latest 8080
+./verify_full_lifecycle.sh myrepo/myapp:latest 8080 /health
+```
+
+측정 단계:
+- Phase 0: 기존 컨테이너/이미지 삭제 (Cold Start 환경 초기화)
+- Phase 1 & 2: `docker pull` 시간 측정 (네트워크 다운로드 + 레이어 압축 해제)
+- Phase 3: 컨테이너 기동 후 HTTP 200 응답까지의 시간 측정
+
+결과는 `dr_lifecycle_results.csv`에 자동 저장됩니다.
+
+| 컬럼 | 설명 |
+|---|---|
+| pull_extract_ms | 이미지 pull + 레이어 추출 시간 (ms) |
+| ready_ms | 컨테이너 기동 후 서비스 준비 시간 (ms) |
+| total_ms | 전체 소요 시간 (ms) |
+| status | SUCCESS / PULL_FAILED / RUN_FAILED / TIMEOUT |
+
+---
+
+### `node_contention_profile.sh` — CPU 경합 환경 성능 프로파일링
+
+`stress-ng`로 호스트 CPU에 인위적인 부하를 주면서 컨테이너 기동 성능을 측정합니다. 실제 운영 환경처럼 노드 자원이 경합 중인 상황에서 이미지 최적화 전후의 성능 차이를 비교하는 용도입니다.
+
+```bash
+./node_contention_profile.sh <이미지명> [run_id]
+
+# 예시
+./node_contention_profile.sh myapp:baseline 1
+./node_contention_profile.sh myapp:optimized 2
+```
+
+사전 요구사항:
+```bash
+apt-get install -y stress-ng
+```
+
+측정 지표:
+- Phase 1: 호스트 전체 CPU 코어에 행렬 연산 부하 주입
+- Phase 2: 컨테이너 기동 후 `/ready` 엔드포인트 폴링 (0.1s 간격, 40s 타임아웃)
+- Phase 3: cgroup PSI(`cpu.pressure`)와 `/proc/<pid>/sched`에서 커널 메트릭 추출
+
+결과는 `node_contention_results.csv`에 자동 저장됩니다.
+
+| 컬럼 | 설명 |
+|---|---|
+| startup_ms | 컨테이너 기동 후 /ready 응답까지 시간 (ms) |
+| kernel_wait_ms | CPU 경합으로 인한 커널 대기 시간 (PSI 기반, ms) |
+| ctx_switches | 기동 구간 동안 발생한 컨텍스트 스위치 횟수 |
