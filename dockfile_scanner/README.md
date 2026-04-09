@@ -6,7 +6,7 @@
 
 ## 저장소 구조
 
-최상단 Git 저장소는 `0206pdh/dockimage_scanner` 이고, 실제 `imgadvisor` 패키지와 문서는 그 아래 `dockfile_scanner/` 하위 프로젝트에 있습니다.
+최상단 Git 저장소는 `gimyw/dockimage_scanner` 이고, 실제 `imgadvisor` 패키지와 문서는 그 아래 `dockfile_scanner/` 하위 프로젝트에 있습니다.
 
 즉 이 문서가 가리키는 실제 프로젝트 루트는 다음 경로입니다.
 
@@ -19,7 +19,7 @@
 최신 release를 기준으로 전용 가상환경 `~/.imgadvisor`에 설치하려면 아래 명령을 사용합니다.
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/0206pdh/dockimage_scanner/main/dockfile_scanner/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/gimyw/dockimage_scanner/main/dockfile_scanner/scripts/install.sh | bash
 ```
 
 이 스크립트는 다음을 처리합니다.
@@ -35,14 +35,14 @@ curl -fsSL https://raw.githubusercontent.com/0206pdh/dockimage_scanner/main/dock
 
 ```bash
 python -m pip install --no-cache-dir --force-reinstall \
-  "git+https://github.com/0206pdh/dockimage_scanner.git@main#subdirectory=dockfile_scanner"
+  "git+https://github.com/gimyw/dockimage_scanner.git@main#subdirectory=dockfile_scanner"
 ```
 
 특정 릴리스를 설치하려면:
 
 ```bash
 python -m pip install --no-cache-dir --force-reinstall \
-  "git+https://github.com/0206pdh/dockimage_scanner.git@v0.3.10#subdirectory=dockfile_scanner"
+  "git+https://github.com/gimyw/dockimage_scanner.git@v0.3.10#subdirectory=dockfile_scanner"
 ```
 
 필수 조건:
@@ -86,8 +86,8 @@ python -m pip install --no-cache-dir --force-reinstall \
 
 실제 전후 비교와 성능/배포 테스트 방법은 아래 문서를 참고합니다.
 
-- [comparison.md](./comparison.md)
-- [benchmark.md](./benchmark.md)
+- [comparison.md](./docs/comparison.md)
+- [benchmark.md](./docs/benchmark.md)
 
 ## 빠른 사용 예시
 
@@ -313,9 +313,8 @@ CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
 ```text
 dockfile_scanner/
 ├─ README.md
-├─ comparison.md
-├─ install.sh
 ├─ pyproject.toml
+├─ requirements.txt
 ├─ imgadvisor/
 │  ├─ main.py
 │  ├─ parser.py
@@ -332,9 +331,33 @@ dockfile_scanner/
 │     ├─ copy_scope.py
 │     ├─ multi_stage.py
 │     └─ python_runtime.py
-└─ test/
-   ├─ Dockerfile.bloated
-   └─ app.py
+├─ scripts/
+│  ├─ install.sh
+│  ├─ verify_full_lifecycle.sh
+│  └─ node_contention_profile.sh
+├─ docs/
+│  ├─ CLI_OVERVIEW.md
+│  ├─ benchmark.md
+│  ├─ comparison.md
+│  ├─ report.md
+│  └─ result.md
+├─ examples/
+│  ├─ Dockerfile.pre1
+│  ├─ Dockerfile.pre1.optimized
+│  ├─ Dockerfile.pre2
+│  ├─ Dockerfile.pre2.optimized
+│  ├─ Dockerfile.pre3
+│  ├─ Dockerfile.pre3.optimized
+│  ├─ Dockerfile.bloated
+│  ├─ app.py
+│  ├─ main.py
+│  └─ requirements.txt
+└─ tests/
+   └─ fixtures/
+      ├─ Dockerfile.go_bad
+      ├─ Dockerfile.multistage_good
+      ├─ Dockerfile.node_bad
+      └─ Dockerfile.python_bad
 ```
 
 ## 현재 범위 정리

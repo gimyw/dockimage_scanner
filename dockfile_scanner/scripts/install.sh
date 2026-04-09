@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-REPO="0206pdh/dockimage_scanner"
+REPO="gimyw/dockimage_scanner"
 SUBDIR="dockfile_scanner"
 TOOL="imgadvisor"
 VENV_DIR="${HOME}/.imgadvisor"
